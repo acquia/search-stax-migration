@@ -1,0 +1,8 @@
+openapi: 3.0.1
+info:
+  title: Search Stax Migration
+  description: Search Stax Migration service
+  x-cortex-tag: acquia/search-stax-migration
+  x-cortex-git:
+    github:
+      repository: acquia/search-stax-migration
