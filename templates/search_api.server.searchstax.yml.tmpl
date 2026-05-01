@@ -1,0 +1,35 @@
+langcode: en
+status: true
+dependencies:
+  module:
+    - search_api_solr
+id: '@@ID@@'
+name: '@@NAME@@'
+description: 'SearchStax-backed Solr server. Created by srsx-migrate.'
+backend: search_api_solr
+backend_config:
+  connector: standard
+  connector_config:
+    scheme: https
+    host: '@@ENDPOINT@@'
+    port: 443
+    path: /
+    core: ''
+    timeout: 5
+    index_timeout: 5
+    optimize_timeout: 10
+    finalize_timeout: 30
+    skip_schema_check: false
+    solr_version: ''
+    http_method: AUTO
+    commit_within: 1000
+    solr_install_dir: ''
+  optimize: false
+  fts_op: AND
+  retrieve_data: true
+  highlight_data: true
+  skip_schema_check: false
+  server_prefix: ''
+  domain: generic
+  i_know_what_i_am_doing: false
+  suppress_missing_languages: false

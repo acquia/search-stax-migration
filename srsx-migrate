@@ -1,0 +1,1558 @@
+#!/usr/bin/env bash
+# srsx-migrate — Acquia Search → SearchStax migration toolkit.
+#
+# Drives the official Acquia migration runbook end-to-end:
+#   https://docs.acquia.com/acquia-cloud-platform/migrating-acquia-search-powered-searchstax
+#
+# Single entry point. All phase logic lives below as `phase_<name>` functions.
+# Run `./srsx-migrate --help` for usage.
+#
+# Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
+
+# Bootstrap: associative arrays require bash 4+. macOS ships 3.2; re-exec
+# under a newer bash if available, otherwise fail with actionable guidance.
+if [ -z "${BASH_VERSINFO+x}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  for cand in /opt/homebrew/bin/bash /usr/local/bin/bash /usr/bin/bash /bin/bash5; do
+    # shellcheck disable=SC2016 # single quotes are intentional; expansion runs in $cand.
+    if [ -x "$cand" ] && "$cand" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
+      exec "$cand" "$0" "$@"
+    fi
+  done
+  echo "ERROR: srsx-migrate requires bash 4+ (current: ${BASH_VERSION:-unknown})." >&2
+  echo "       On macOS:  brew install bash" >&2
+  echo "       Then re-run: $0 $*" >&2
+  exit 1
+fi
+
+set -euo pipefail
+shopt -s nullglob
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+readonly SCRIPT_NAME="srsx-migrate"
+readonly SCRIPT_VERSION="1.0.0-dev"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+# REPO_ROOT is the Drupal/composer project root we operate against (where
+# composer.json lives and where Drupal config sync is checked in). Prefer the
+# enclosing git toplevel; if we're not in a repo (e.g. fresh demo run), fall
+# back to SCRIPT_DIR. May be overridden by enable_demo_mode().
+if REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  REPO_ROOT="$SCRIPT_DIR"
+fi
+readonly DOCS_BASE="https://docs.acquia.com/acquia-cloud-platform"
+readonly MIGRATION_DOC="${DOCS_BASE}/migrating-acquia-search-powered-searchstax"
+
+# Per-phase doc URLs (also surfaced via `./srsx-migrate explain <phase>`).
+declare -A PHASE_DOC=(
+  [preflight]="${DOCS_BASE}/preparing-migration-acquia-search-powered-searchstax"
+  [install]="${DOCS_BASE}/installing-searchstax-module"
+  [backup]="${DOCS_BASE}/preparing-migration-acquia-search-powered-searchstax"
+  [configure]="${DOCS_BASE}/enabling-searchstax-module-and-routing-searches-through-it"
+  [server]="${DOCS_BASE}/migrating-server-drupal-acquia-search-powered-searchstax"
+  [index]="${DOCS_BASE}/migrating-index-drupal-acquia-search-powered-searchstax"
+  [views]="${DOCS_BASE}/migrating-views-drupal-acquia-search-powered-searchstax"
+  [route]="${DOCS_BASE}/enabling-searchstax-module-and-routing-searches-through-it"
+  [validate]="${DOCS_BASE}/validating-search-page"
+  [handoff]="${DOCS_BASE}/committing-and-deploying-changes"
+  [cleanup]="${DOCS_BASE}/removing-legacy-search-module-and-configuration"
+)
+
+declare -A PHASE_DESC=(
+  [preflight]="Run drush status, sapi-s, sapi-i, pm:list against the target Acquia env to verify versions and inventory the current Solr setup."
+  [backup]="(Optional) refresh dev DB from prod with 'acli pull:db', then trigger an on-demand Acquia DB backup and wait for it to finish."
+  [install]="composer require search_api/search_api_solr/searchstax/key locally, push the branch, wait for Acquia to deploy, then drush updb + cr + en the modules."
+  [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
+  [server]="Create the SearchStax-backed search_api server config."
+  [index]="Clone each legacy index into a SearchStax-backed copy and reindex."
+  [views]="Switch every Search-API view to its new SearchStax-backed index."
+  [route]="Enable 'Re-route searches through SearchStudio' + write analytics URL/key."
+  [validate]="Assert server URL, item counts, and view bindings on the target env."
+  [handoff]="drush cex on target, pull config to local repo, git add. Does NOT commit or push."
+  [cleanup]="Uninstall migration submodule, remove legacy server/index/views/modules."
+)
+
+# Ordered list of phases for `all` and `status`. Backup runs BEFORE install
+# so the customer has a fresh restore point before any composer/drush change.
+readonly -a PHASE_ORDER=(
+  preflight backup install configure server index views route validate handoff cleanup
+)
+
+# Environment names treated as production. Mutating phases run against
+# dev/stage; once you're happy with the result there, you deploy to these
+# environments through your normal Acquia workflow.
+readonly -a PROD_ENV_NAMES=(prod production live www main master)
+
+# =============================================================================
+# GLOBAL FLAGS / STATE
+# =============================================================================
+
+DRY_RUN=0
+DEMO=0
+USE_COLOR=1
+ASSUME_YES=0
+FORCE=0                    # --force re-runs phases marked done.
+declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
+LOG_FILE=""
+
+# Acquia app + target env. Loaded from migration.env, captured by ensure_init() if blank.
+# EFFECTIVE_ENV is the env used for THIS invocation; defaults to ACQUIA_TARGET_ENV but
+# can be overridden by `--env <name>` on the validate subcommand only.
+ACQUIA_APP=""
+ACQUIA_TARGET_ENV=""
+EFFECTIVE_ENV=""
+ALLOW_PROD_ENV=0           # Set true only by `validate --env <prodlike>` (read-only).
+
+# Dirs (created at runtime, gitignored). All derived from SRSX_HOME so that
+# `--demo` can rebase them under a throwaway tmpdir without touching the
+# toolkit's own files (migration.env, state/, logs/, artifacts/).
+SRSX_HOME="${SCRIPT_DIR}"
+ARTIFACTS_DIR="${SRSX_HOME}/artifacts"
+LOG_DIR="${SRSX_HOME}/logs"
+STATE_DIR="${SRSX_HOME}/state"   # Tracks last completed phase, etc.
+ENV_FILE="${SRSX_HOME}/migration.env"
+
+# =============================================================================
+# COLOR + OUTPUT HELPERS
+# =============================================================================
+
+# Defaults so output helpers work even before init_colors() runs (set -u safe).
+C_HEAD=""; C_OK=""; C_WARN=""; C_ERR=""
+C_PROMPT=""; C_DIM=""; C_BOLD=""; C_RST=""
+
+init_colors() {
+  if [[ "$USE_COLOR" == "1" ]] \
+     && [[ -t 1 ]] \
+     && [[ "${NO_COLOR:-}" == "" ]] \
+     && [[ "${TERM:-dumb}" != "dumb" ]]; then
+    C_HEAD=$'\033[1;36m'   # bold cyan
+    C_OK=$'\033[1;32m'     # bold green
+    C_WARN=$'\033[1;33m'   # bold yellow
+    C_ERR=$'\033[1;31m'    # bold red
+    C_PROMPT=$'\033[1;35m' # bold magenta
+    C_DIM=$'\033[2m'       # dim
+    C_BOLD=$'\033[1m'
+    C_RST=$'\033[0m'
+  else
+    C_HEAD=""; C_OK=""; C_WARN=""; C_ERR=""
+    C_PROMPT=""; C_DIM=""; C_BOLD=""; C_RST=""
+  fi
+}
+
+# Phase header — call as `header "preflight" "Verify environment"`.
+header() {
+  local phase="$1" subtitle="${2:-}"
+  printf '\n'
+  if [[ "$DEMO" == "1" ]]; then
+    printf '%s[DEMO MODE — no real changes]%s\n' "$C_WARN" "$C_RST"
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s[DRY RUN — commands not executed]%s\n' "$C_WARN" "$C_RST"
+  fi
+  printf '%s▶ Phase: %s%s%s\n' "$C_HEAD" "$C_BOLD" "$phase" "$C_RST"
+  [[ -n "$subtitle" ]] && printf '  %s\n' "$subtitle"
+  if [[ -n "${ACQUIA_APP:-}" && -n "${EFFECTIVE_ENV:-}" ]]; then
+    printf '  %sOperating against: %s%s.%s%s\n' \
+      "$C_DIM" "$C_BOLD" "${ACQUIA_APP}" "${EFFECTIVE_ENV}" "$C_RST"
+  fi
+  if [[ -n "${PHASE_DOC[$phase]:-}" ]]; then
+    printf '  %sdoc: %s%s\n' "$C_DIM" "${PHASE_DOC[$phase]}" "$C_RST"
+  fi
+  printf '\n'
+}
+
+ok()   { printf '%s[OK]%s %s\n' "$C_OK" "$C_RST" "$*"; }
+warn() { printf '%s[WARN]%s %s\n' "$C_WARN" "$C_RST" "$*" >&2; }
+err()  { printf '%s[ERROR]%s %s\n' "$C_ERR" "$C_RST" "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+dim()  { printf '%s%s%s\n' "$C_DIM" "$*" "$C_RST"; }
+
+# Emit a `+ command` audit line in dim grey before executing.
+audit() {
+  printf '%s+ %s%s\n' "$C_DIM" "$*" "$C_RST"
+}
+
+# =============================================================================
+# COMMAND EXECUTION (DRY-RUN AWARE)
+# =============================================================================
+
+# run <args...> — print + execute; under --dry-run, only print.
+run() {
+  audit "$*"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return 0
+  fi
+  "$@"
+}
+
+# run_capture <varname> <args...> — print + execute, capture stdout into $varname.
+# Under --dry-run, sets $varname to empty string.
+run_capture() {
+  local var="$1"; shift
+  audit "$*"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf -v "$var" '%s' ""
+    return 0
+  fi
+  local _out
+  _out="$("$@")" || return $?
+  printf -v "$var" '%s' "$_out"
+}
+
+# Drush wrapper. ALWAYS invoked via `acli remote:drush <app>.<env> --` so that
+# every mutation lands on the customer's Acquia dev/stage environment, never
+# on their laptop's local Drupal. Per-site multisite iteration uses --uri=...
+DRUSH_URI=""
+drush() {
+  [[ -n "${ACQUIA_APP:-}" ]] || err "ACQUIA_APP not set. Run './srsx-migrate init' or set it in migration.env."
+  [[ -n "${EFFECTIVE_ENV:-}" ]] || err "EFFECTIVE_ENV not set. (Internal bug — ensure_init not called?)"
+  local -a cmd=(acli remote:drush "${ACQUIA_APP}.${EFFECTIVE_ENV}" --)
+  if [[ -n "$DRUSH_URI" ]]; then
+    cmd+=(--uri="$DRUSH_URI")
+  fi
+  cmd+=("$@")
+  run "${cmd[@]}"
+}
+
+# Same as drush(), but captures output into $1.
+drush_capture() {
+  local var="$1"; shift
+  [[ -n "${ACQUIA_APP:-}" ]] || err "ACQUIA_APP not set. Run './srsx-migrate init' first."
+  [[ -n "${EFFECTIVE_ENV:-}" ]] || err "EFFECTIVE_ENV not set."
+  local -a cmd=(acli remote:drush "${ACQUIA_APP}.${EFFECTIVE_ENV}" --)
+  [[ -n "$DRUSH_URI" ]] && cmd+=(--uri="$DRUSH_URI")
+  cmd+=("$@")
+  run_capture "$var" "${cmd[@]}"
+}
+
+# Run a shell command on the target Acquia env via `acli ssh`. Used by Phase
+# 'handoff' to pull config files exported on the remote into the local repo.
+acli_ssh() {
+  [[ -n "${ACQUIA_APP:-}" ]] || err "ACQUIA_APP not set."
+  [[ -n "${EFFECTIVE_ENV:-}" ]] || err "EFFECTIVE_ENV not set."
+  run acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "$@"
+}
+
+# Capturing variant of acli_ssh.
+acli_ssh_capture() {
+  local var="$1"; shift
+  [[ -n "${ACQUIA_APP:-}" ]] || err "ACQUIA_APP not set."
+  [[ -n "${EFFECTIVE_ENV:-}" ]] || err "EFFECTIVE_ENV not set."
+  run_capture "$var" acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "$@"
+}
+
+composer_in_repo() {
+  ( cd "$REPO_ROOT" && run command composer "$@" )
+}
+
+# =============================================================================
+# INTERACTIVE PROMPTS
+# =============================================================================
+
+# confirm <message> — Enter to continue, Ctrl-C to abort.
+# Skipped under --yes or non-TTY (e.g. CI).
+confirm() {
+  local msg="$1"
+  if [[ "$ASSUME_YES" == "1" ]] || [[ ! -t 0 ]]; then
+    info "${C_PROMPT}? ${msg}${C_RST} [auto-yes]"
+    return 0
+  fi
+  printf '%s? %s%s — Press Enter to continue, Ctrl-C to abort: ' \
+    "$C_PROMPT" "$msg" "$C_RST"
+  read -r _
+}
+
+# ask <prompt> <varname> [<default>] — capture freeform input.
+ask() {
+  local prompt="$1" var="$2" default="${3:-}"
+  if (( ${#DEMO_ANSWERS_ARR[@]} > 0 )); then
+    local ans="${DEMO_ANSWERS_ARR[0]}"
+    DEMO_ANSWERS_ARR=("${DEMO_ANSWERS_ARR[@]:1}")
+    info "${C_PROMPT}? ${prompt}${C_RST} [scripted: ${ans}]"
+    printf -v "$var" '%s' "$ans"
+    return 0
+  fi
+  local suffix=""
+  [[ -n "$default" ]] && suffix=" [default: ${default}]"
+  printf '%s? %s%s%s: ' "$C_PROMPT" "$prompt" "$suffix" "$C_RST"
+  local input
+  read -r input || input=""
+  [[ -z "$input" && -n "$default" ]] && input="$default"
+  printf -v "$var" '%s' "$input"
+}
+
+# ask_secret <prompt> <varname> — input echo disabled.
+ask_secret() {
+  local prompt="$1" var="$2"
+  if (( ${#DEMO_ANSWERS_ARR[@]} > 0 )); then
+    local ans="${DEMO_ANSWERS_ARR[0]}"
+    DEMO_ANSWERS_ARR=("${DEMO_ANSWERS_ARR[@]:1}")
+    info "${C_PROMPT}? ${prompt}${C_RST} [scripted: ********]"
+    printf -v "$var" '%s' "$ans"
+    return 0
+  fi
+  printf '%s? %s%s (input hidden): ' "$C_PROMPT" "$prompt" "$C_RST"
+  local input
+  read -r -s input || input=""
+  printf '\n'
+  printf -v "$var" '%s' "$input"
+}
+
+# ask_choice <prompt> <varname> <opt1> <opt2> ...
+ask_choice() {
+  local prompt="$1" var="$2"; shift 2
+  local -a opts=("$@")
+  printf '%s? %s%s\n' "$C_PROMPT" "$prompt" "$C_RST"
+  local i=1
+  for o in "${opts[@]}"; do
+    printf '    [%d] %s\n' "$i" "$o"
+    ((i++))
+  done
+  local choice
+  if (( ${#DEMO_ANSWERS_ARR[@]} > 0 )); then
+    choice="${DEMO_ANSWERS_ARR[0]}"
+    DEMO_ANSWERS_ARR=("${DEMO_ANSWERS_ARR[@]:1}")
+    info "  [scripted choice: ${choice}]"
+  else
+    printf '  Choice [1]: '
+    read -r choice || choice=1
+    [[ -z "$choice" ]] && choice=1
+  fi
+  if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#opts[@]} )); then
+    err "Invalid choice: $choice"
+  fi
+  printf -v "$var" '%s' "${opts[$((choice-1))]}"
+}
+
+# Pause between phases when in --demo mode so the user can read the output
+# and Press Enter to step to the next phase. Skipped automatically when stdin
+# is not a TTY (e.g. when running under CI or piped input).
+demo_pause() {
+  [[ "$DEMO" == "1" ]] || return 0
+  [[ ! -t 0 ]] && return 0
+  printf '\n%s[demo: press Enter for next phase…]%s' "$C_DIM" "$C_RST"
+  read -r _ || true
+  printf '\n'
+}
+
+# Realistic latency for demo so it doesn't feel like a teleprompter dump.
+demo_sleep() {
+  [[ "$DEMO" == "1" ]] || return 0
+  [[ ! -t 0 ]] && return 0
+  local secs="${1:-0.6}"
+  sleep "$secs" 2>/dev/null || true
+}
+
+# =============================================================================
+# STATE
+# =============================================================================
+
+state_set() {
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$2" > "${STATE_DIR}/$1"
+}
+
+state_get() {
+  [[ -f "${STATE_DIR}/$1" ]] && cat "${STATE_DIR}/$1" || echo ""
+}
+
+# =============================================================================
+# PREREQUISITES & ENV LOADING
+# =============================================================================
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  local hint=""
+  case "$1" in
+    acli)
+      hint="  macOS:        brew install --cask acli
+       Linux/other:  https://docs.acquia.com/acquia-cli/install/
+       Then:         acli auth:login"
+      ;;
+    composer)
+      hint="  macOS:        brew install composer
+       Linux:        https://getcomposer.org/download/"
+      ;;
+    jq)
+      hint="  macOS:        brew install jq
+       Ubuntu/Debian:sudo apt-get install -y jq
+       Acquia IDE:   already installed"
+      ;;
+    git)
+      hint="  macOS:        brew install git (or 'xcode-select --install')
+       Ubuntu/Debian:sudo apt-get install -y git"
+      ;;
+    *)
+      hint="  Install '$1' via your platform's package manager, then re-run."
+      ;;
+  esac
+  err "Required command not found: $1
+${hint}"
+}
+
+load_env() {
+  local envfile="$ENV_FILE"
+  if [[ -f "$envfile" ]]; then
+    # shellcheck disable=SC1090
+    source "$envfile"
+  fi
+
+  # Parse SITES env into the array (comma-separated).
+  if [[ -n "${SITES:-}" ]]; then
+    IFS=',' read -r -a SITES_ARR <<< "$SITES"
+  fi
+
+  # EFFECTIVE_ENV defaults to ACQUIA_TARGET_ENV; --env <name> on dispatch overrides for validate.
+  EFFECTIVE_ENV="${ACQUIA_TARGET_ENV:-}"
+}
+
+# True if the given env name looks like a production env. Mutating phases
+# only target dev/stage; the read-only `validate` phase can still target any
+# env, including prod, after the changes have been deployed.
+is_prod_env() {
+  local name; name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  for p in "${PROD_ENV_NAMES[@]}"; do
+    [[ "$name" == "$p" ]] && return 0
+  done
+  return 1
+}
+
+# Parse comma-separated DEMO_ANSWERS env var into array (consumed by ask*).
+declare -a DEMO_ANSWERS_ARR=()
+load_demo_answers() {
+  if [[ -n "${DEMO_ANSWERS:-}" ]]; then
+    IFS=',' read -r -a DEMO_ANSWERS_ARR <<< "$DEMO_ANSWERS"
+  fi
+}
+
+# =============================================================================
+# DEMO MODE — PATH SHIMMING
+# =============================================================================
+
+enable_demo_mode() {
+  local demo_bin="${SCRIPT_DIR}/lib/demo/bin"
+  [[ -d "$demo_bin" ]] || err "Demo bin dir missing: $demo_bin
+       (Was the toolkit installed via install.sh? See README.md.)"
+  export PATH="${demo_bin}:${PATH}"
+  export SRSX_DEMO_FIXTURES="${SCRIPT_DIR}/lib/demo/fixtures"
+  DEMO=1
+  warn "Demo mode active. PATH prefixed with ${demo_bin}"
+
+  # Use a stable, predictable throw-away SRSX_HOME so the demo behaves exactly
+  # like a real run (wizard prompts on first invocation, resume across repeat
+  # invocations) without touching the toolkit's own files. SRSX_HOME may be
+  # pre-set in the environment to pin a custom location (used by tests).
+  local demo_home="${SRSX_DEMO_HOME:-${TMPDIR:-/tmp}/srsx-demo-home}"
+  mkdir -p "${demo_home}/config/sync"
+  ( cd "$demo_home" && [[ ! -d .git ]] && command git init -q 2>/dev/null || true )
+  REPO_ROOT="$demo_home"
+
+  # Rebase all runtime paths under the throwaway home so the wizard's saved
+  # migration.env, state markers, logs, and artifacts all live there.
+  SRSX_HOME="$demo_home"
+  ARTIFACTS_DIR="${SRSX_HOME}/artifacts"
+  LOG_DIR="${SRSX_HOME}/logs"
+  STATE_DIR="${SRSX_HOME}/state"
+  ENV_FILE="${SRSX_HOME}/migration.env"
+
+  info "Demo home: ${SRSX_HOME}"
+  info "  (migration.env, state/, logs/, artifacts/ live here; rm -rf to reset)"
+}
+
+# =============================================================================
+# FIRST-RUN WIZARD + RESUME + IDEMPOTENCY GUARDS
+# =============================================================================
+
+# ensure_init — interactive first-run wizard. Captures ACQUIA_APP and
+# ACQUIA_TARGET_ENV (defaults dev), persists to migration.env, and writes
+# state/init.done so we never ask again.
+ensure_init() {
+  if [[ -f "${STATE_DIR}/init.done" ]] \
+     && [[ -n "${ACQUIA_APP:-}" ]] \
+     && [[ -n "${ACQUIA_TARGET_ENV:-}" ]]; then
+    # Don't clobber an EFFECTIVE_ENV that was set by --env <name> on the CLI.
+    : "${EFFECTIVE_ENV:=${ACQUIA_TARGET_ENV}}"
+    return 0
+  fi
+
+  printf '%s%s── First-run setup ──%s\n\n' "$C_HEAD" "$C_BOLD" "$C_RST"
+  cat <<EOF
+This toolkit migrates your Drupal Search-API configuration from Acquia
+Search to Acquia Search powered by SearchStax. You run it from your Cloud
+IDE or local clone against your Acquia DEV (or STAGE) environment via
+'acli remote:drush'. Once you've validated the result on dev/stage, you
+deploy the staged config changes to production through your normal Acquia
+workflow.
+
+You can re-run this wizard any time:  ./srsx-migrate init
+
+EOF
+
+  if [[ -z "${ACQUIA_APP:-}" ]]; then
+    if command -v acli >/dev/null 2>&1 \
+       && [[ "$DEMO" != "1" ]] && [[ "$DRY_RUN" != "1" ]] && [[ -t 0 ]]; then
+      info "Looking up your Acquia applications…"
+      audit "acli api:applications:find"
+      acli api:applications:find 2>/dev/null \
+        | head -40 \
+        | sed 's/^/    /' || true
+      printf '\n'
+    fi
+    ask "Acquia application alias or UUID (e.g. myapp)" ACQUIA_APP
+    [[ -n "$ACQUIA_APP" ]] || err "ACQUIA_APP cannot be empty."
+  fi
+
+  if [[ -z "${ACQUIA_TARGET_ENV:-}" ]]; then
+    while :; do
+      ask "Target environment for this migration run (dev or stage)" \
+          ACQUIA_TARGET_ENV "dev"
+      if is_prod_env "$ACQUIA_TARGET_ENV"; then
+        warn "Pick 'dev' or 'stage' here. The toolkit runs the mutating phases against a
+       lower environment so you can test the migrated search before it reaches
+       your live site. Once you're happy, deploy the staged changes to prod
+       through your normal Acquia workflow."
+        ACQUIA_TARGET_ENV=""
+        continue
+      fi
+      break
+    done
+  fi
+
+  # Multisite. Single-site is the default. If multisite, ask for the comma-
+  # separated list of --uri values; phases iterate over them automatically.
+  if [[ -z "${SITES:-}" ]] && (( ${#SITES_ARR[@]} == 0 )); then
+    local is_multi
+    ask "Is this a Drupal multisite install? (y/N)" is_multi "n"
+    if [[ "$is_multi" =~ ^[Yy] ]]; then
+      local sites_csv
+      ask "Comma-separated --uri values for sites to migrate (e.g. https://a.example.com,https://b.example.com)" \
+          sites_csv
+      [[ -n "$sites_csv" ]] || err "At least one --uri is required for multisite."
+      SITES="$sites_csv"
+      IFS=',' read -r -a SITES_ARR <<< "$SITES"
+      _save_env_var SITES "$SITES"
+    fi
+  fi
+
+  EFFECTIVE_ENV="${ACQUIA_TARGET_ENV}"
+  _save_env_var ACQUIA_APP "$ACQUIA_APP"
+  _save_env_var ACQUIA_TARGET_ENV "$ACQUIA_TARGET_ENV"
+  mkdir -p "$STATE_DIR"
+  : > "${STATE_DIR}/init.done"
+
+  ok "Saved: ACQUIA_APP=${ACQUIA_APP}, ACQUIA_TARGET_ENV=${ACQUIA_TARGET_ENV}"
+  printf '\n'
+}
+
+# Block a mutating phase from running directly against a production env.
+# The read-only `validate` phase has its own gate (ALLOW_PROD_ENV) so it can
+# safely re-check prod after deployment.
+guard_against_prod() {
+  if [[ "$ALLOW_PROD_ENV" == "1" ]]; then
+    return 0
+  fi
+  if is_prod_env "${EFFECTIVE_ENV:-}"; then
+    err "Mutating phases run on dev/stage so you can validate the migration before
+       it goes live. Re-run with ACQUIA_TARGET_ENV=dev (or stage), then deploy
+       the staged changes to '${EFFECTIVE_ENV}' through your normal Acquia
+       workflow."
+  fi
+}
+
+# Idempotency: each phase records state/done-<phase> on success. On the next
+# run, if the marker exists, the phase prints [OK] already complete and skips
+# unless --force was passed.
+phase_done_check() {
+  local phase="$1"
+  if [[ "$FORCE" == "1" ]]; then
+    return 1
+  fi
+  [[ -f "${STATE_DIR}/done-${phase}" ]]
+}
+
+phase_done_mark() {
+  mkdir -p "$STATE_DIR"
+  : > "${STATE_DIR}/done-$1"
+  state_set "last-phase" "$1"
+}
+
+phase_done_clear() {
+  rm -f "${STATE_DIR}/done-$1"
+}
+
+# Print "already complete" notice and return 0 (skip).
+phase_skip_done() {
+  local phase="$1"
+  ok "Phase '${phase}' already complete on a previous run. Use --force to re-run."
+  return 0
+}
+
+# resume_or_select — if a previous run left state/last-phase, ask the user
+# whether to resume from the next phase, restart from preflight, or pick.
+# Sets RUN_FROM (a phase name) for run_all() to honor.
+RUN_FROM=""
+resume_or_select() {
+  local last; last="$(state_get last-phase)"
+  if [[ -z "$last" ]]; then
+    RUN_FROM="${PHASE_ORDER[0]}"
+    return 0
+  fi
+
+  local next="" i=0
+  for p in "${PHASE_ORDER[@]}"; do
+    if [[ "$p" == "$last" ]]; then
+      next="${PHASE_ORDER[$((i+1))]:-}"
+      break
+    fi
+    ((++i))
+  done
+
+  if [[ -z "$next" ]]; then
+    ok "All phases were completed on a previous run (last: ${last})."
+    info "  To replay everything from scratch:  rm -rf state/ logs/ artifacts/  &&  $0 ${DEMO:+--demo }all"
+    info "  To re-run one phase:                $0 ${DEMO:+--demo }<phase> --force"
+    info "  To pick a starting phase:           $0 ${DEMO:+--demo }<phase>"
+    info "  Valid phases: ${PHASE_ORDER[*]}"
+    exit 0
+  fi
+
+  if [[ "$ASSUME_YES" == "1" ]] || [[ ! -t 0 ]]; then
+    info "Resuming from '${next}' (last completed: ${last})"
+    RUN_FROM="$next"
+    return 0
+  fi
+
+  printf '%s%sPrevious run found.%s\n' "$C_BOLD" "$C_HEAD" "$C_RST"
+  printf '  Last completed phase: %s\n\n' "$last"
+  local choice
+  ask_choice "What do you want to do?" choice \
+    "Resume from '${next}' (recommended)" \
+    "Restart from '${PHASE_ORDER[0]}' (clears progress)" \
+    "Pick a specific phase"
+  case "$choice" in
+    Resume*)
+      RUN_FROM="$next"
+      ;;
+    Restart*)
+      info "Clearing progress markers under ${STATE_DIR}/done-*"
+      rm -f "${STATE_DIR}"/done-*
+      RUN_FROM="${PHASE_ORDER[0]}"
+      ;;
+    Pick*)
+      local picked
+      ask "Phase name to start from" picked "$next"
+      [[ -n "${PHASE_DESC[$picked]:-}" ]] \
+        || err "Unknown phase: ${picked}. Valid: ${PHASE_ORDER[*]}"
+      RUN_FROM="$picked"
+      ;;
+  esac
+}
+
+# =============================================================================
+# MULTISITE — honor SITES (comma-separated --uri values) from migration.env
+# =============================================================================
+
+# Run a phase function once per configured site. Single-site sites just calls
+# the phase function once with no --uri.
+for_each_site() {
+  local fn="$1"
+  if (( ${#SITES_ARR[@]} == 0 )); then
+    DRUSH_URI=""
+    "$fn"
+    return
+  fi
+  for s in "${SITES_ARR[@]}"; do
+    if [[ -n "$s" && "$s" != "default" ]]; then
+      DRUSH_URI="$s"
+      info "${C_BOLD}── Site: ${s} ──${C_RST}"
+    else
+      DRUSH_URI=""
+    fi
+    "$fn"
+  done
+  DRUSH_URI=""
+}
+
+# =============================================================================
+# PHASE A — Installer / scaffolding
+# =============================================================================
+# (Scaffolding is install.sh's job; nothing to do here at runtime.)
+
+# =============================================================================
+# PHASE B — Preflight: drush status, inventory, multisite detect
+# =============================================================================
+
+phase_preflight() {
+  header "preflight" "${PHASE_DESC[preflight]}"
+  if phase_done_check preflight; then phase_skip_done preflight; return 0; fi
+
+  require_cmd acli
+  require_cmd composer
+  require_cmd jq
+  require_cmd git
+
+  # Don't refuse prod here — preflight is read-only. Other mutating phases
+  # call guard_against_prod() themselves.
+
+  demo_sleep 0.4
+  local status_json
+  drush_capture status_json status --format=json
+  if [[ -z "$status_json" ]]; then
+    err "acli remote:drush returned nothing for ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+       Check:  acli auth:login
+               acli api:applications:find
+               acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- status"
+  fi
+
+  local drupal_ver drush_ver bootstrap db
+  drupal_ver=$(printf '%s' "$status_json" | jq -r '.["drupal-version"] // ""')
+  drush_ver=$(printf '%s' "$status_json"  | jq -r '.["drush-version"] // ""')
+  bootstrap=$(printf '%s' "$status_json"  | jq -r '.["bootstrap"] // ""')
+  db=$(printf '%s' "$status_json"         | jq -r '.["db-status"] // ""')
+
+  info "Drupal:    ${drupal_ver:-?}"
+  info "Drush:     ${drush_ver:-?}"
+  info "Bootstrap: ${bootstrap:-?}"
+  info "DB:        ${db:-?}"
+
+  if [[ "$drupal_ver" =~ ^7\. ]]; then
+    err "Drupal 7 is not supported by this toolkit.
+       Follow the SearchStax direct setup guide instead:
+       https://support.searchstax.com/hc/en-us/categories/11675838621325-Site-Search"
+  fi
+  if [[ -n "$drush_ver" ]] && [[ "${drush_ver%%.*}" -lt 11 ]]; then
+    err "Drush ${drush_ver} is too old. Drush 11+ required. Upgrade with:
+       composer require --dev drush/drush:^12 -W"
+  fi
+  if [[ "$bootstrap" != "" && "$bootstrap" != "Successful" ]]; then
+    warn "Bootstrap status: ${bootstrap}. Some phases may fail."
+  fi
+
+  ok "Drupal/Drush versions OK."
+
+  # Inventory.
+  demo_sleep 0.4
+  local servers indexes mods
+  drush_capture servers sapi-s --format=json
+  drush_capture indexes sapi-i --format=json
+  drush_capture mods    pm:list --type=module --status=enabled --format=json
+
+  mkdir -p "$ARTIFACTS_DIR"
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  local invdir="${ARTIFACTS_DIR}/inventory-${ts}"
+  mkdir -p "$invdir"
+  printf '%s\n' "$servers" > "${invdir}/servers.json"
+  printf '%s\n' "$indexes" > "${invdir}/indexes.json"
+  printf '%s\n' "$mods"    > "${invdir}/modules.json"
+
+  local n_srv n_idx
+  n_srv=$(printf '%s' "$servers" | jq 'length' 2>/dev/null || echo 0)
+  n_idx=$(printf '%s' "$indexes" | jq 'length' 2>/dev/null || echo 0)
+  ok "Inventory captured: ${n_srv} servers, ${n_idx} indexes → ${invdir}"
+
+  # Multisite info (driven by SITES env var; set during 'init' wizard).
+  if (( ${#SITES_ARR[@]} > 1 )); then
+    info "Multisite mode: will iterate over ${#SITES_ARR[@]} sites: ${SITES_ARR[*]}"
+  fi
+
+  # Module presence check.
+  if printf '%s' "$mods" | jq -e '.searchstax' >/dev/null 2>&1; then
+    ok "searchstax module already installed on ${EFFECTIVE_ENV} — install phase will be a no-op."
+    state_set "module-installed" "1"
+  else
+    info "searchstax module not yet installed on ${EFFECTIVE_ENV} — install phase will add it."
+  fi
+
+  cat <<EOF
+
+${C_BOLD}Step 8 of the Acquia preparation guide — Document your current search setup.${C_RST}
+  This toolkit captures servers/indexes/modules above, but the doc also asks
+  you to record (with screenshots) before continuing:
+    • Apache Solr server names + index names + current item counts
+    • Drupal search results views
+    • Search behaviors including autocomplete settings
+  Open the doc, follow step 8, then come back here to continue:
+    ${PHASE_DOC[preflight]}#prerequisites
+
+EOF
+  confirm "Have you completed doc step 8 (documented current search setup)?"
+
+  phase_done_mark preflight
+}
+
+# =============================================================================
+# PHASE C — Install: composer require + drush en
+# =============================================================================
+
+phase_install() {
+  header "install" "${PHASE_DESC[install]}"
+  if phase_done_check install; then phase_skip_done install; return 0; fi
+  guard_against_prod
+
+  cat <<EOF
+This phase mirrors the Acquia walkthrough video for the install step:
+  Doc:   ${PHASE_DOC[install]}
+  Video: https://vimeo.com/1155060875
+If this is your first migration, watch the video once before continuing —
+it shows exactly what the steps below do in the Acquia UI.
+
+EOF
+  confirm "Ready to require the SearchStax + Search-API modules in composer?"
+
+  composer_in_repo require --no-interaction --no-progress \
+    drupal/search_api:^1 \
+    drupal/search_api_solr:^4 \
+    drupal/searchstax:^1.11 \
+    drupal/key:^1
+
+  ok "composer.json + composer.lock updated locally."
+
+  # Discover git remote(s) so we can show the customer where their push will land.
+  local remotes=""
+  if remotes="$( cd "$REPO_ROOT" && command git remote -v 2>/dev/null )" && [[ -n "$remotes" ]]; then
+    info "Detected git remote(s) for ${REPO_ROOT}:"
+    printf '%s\n' "$remotes" | sed 's/^/    /'
+  else
+    warn "No git remotes found in ${REPO_ROOT}. Add one with 'git remote add origin <url>' before continuing."
+    confirm "Continue anyway?"
+  fi
+
+  # Pick the branch the customer wants to push to (this is what Acquia will deploy).
+  local default_branch
+  default_branch="$( cd "$REPO_ROOT" && command git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")"
+  local push_branch
+  ask "Branch name to commit + push to (Acquia will auto-deploy this to ${EFFECTIVE_ENV})" \
+      push_branch "$default_branch"
+  [[ -n "$push_branch" ]] || err "Branch name cannot be empty."
+
+  ( cd "$REPO_ROOT" && run git add composer.json composer.lock )
+  ( cd "$REPO_ROOT" && run git status --short )
+
+  confirm "About to commit composer.json/lock and push to origin/${push_branch}"
+  ( cd "$REPO_ROOT" && run git commit -m "Search: install SearchStax migration modules" )
+  ( cd "$REPO_ROOT" && run git push origin "$push_branch" )
+  ok "Pushed to origin/${push_branch}."
+
+  # Wait for Acquia to redeploy the env. The most reliable signal is that the
+  # env's deployed VCS path matches the branch we just pushed.
+  if [[ "$DRY_RUN" == "0" ]]; then
+    info "Waiting for Acquia to redeploy ${ACQUIA_APP}.${EFFECTIVE_ENV} with branch '${push_branch}' (polling every 15s, up to 10 min)…"
+    local tries=0 max_tries=40 envinfo deployed=""
+    while (( tries < max_tries )); do
+      envinfo="$(acli api:environments:find "${ACQUIA_APP}.${EFFECTIVE_ENV}" 2>/dev/null || echo '{}')"
+      deployed="$(printf '%s' "$envinfo" | jq -r '.vcs.path // .vcs_path // ""' 2>/dev/null || echo "")"
+      if [[ "$deployed" == "$push_branch" ]] || [[ "$deployed" == "refs/heads/${push_branch}" ]]; then
+        ok "Acquia is now serving '${push_branch}' on ${EFFECTIVE_ENV}."
+        break
+      fi
+      ((++tries))
+      sleep 15 2>/dev/null || true
+    done
+    if (( tries >= max_tries )); then
+      warn "Could not auto-confirm the deploy. Check the Acquia Cloud UI before continuing."
+      confirm "Has Acquia finished deploying '${push_branch}' to ${EFFECTIVE_ENV}?"
+    fi
+  fi
+
+  for_each_site _phase_install_site
+  phase_done_mark install
+}
+
+_phase_install_site() {
+  info "Updating database schemas (drush updb)"
+  drush updb -y
+  info "Rebuilding cache (drush cr)"
+  drush cr
+  info "Enabling modules: search_api search_api_solr searchstax solr_to_searchstax_ss_migration key"
+  drush en -y search_api search_api_solr searchstax solr_to_searchstax_ss_migration key
+  drush cr
+  ok "Modules enabled${DRUSH_URI:+ on ${DRUSH_URI}}."
+}
+
+# =============================================================================
+# PHASE D — Backup + config snapshot
+# =============================================================================
+
+phase_backup() {
+  header "backup" "${PHASE_DESC[backup]}"
+  if phase_done_check backup; then phase_skip_done backup; return 0; fi
+  guard_against_prod
+
+  cat <<EOF
+Before mutating ${ACQUIA_APP}.${EFFECTIVE_ENV}, you should:
+  1. Make sure ${EFFECTIVE_ENV} has a recent copy of the production DB so the
+     migration test reflects real data. The toolkit can run that for you:
+        acli pull:db ${ACQUIA_APP}.${EFFECTIVE_ENV}
+     (Source defaults to your prod env. Skip this if you already refreshed.)
+  2. Trigger an on-demand backup of the ${EFFECTIVE_ENV} DB and wait for it
+     to finish so you have a clean restore point.
+
+EOF
+
+  local do_pull
+  ask "Refresh ${EFFECTIVE_ENV} DB from production now via 'acli pull:db'? (y/N)" do_pull "n"
+  if [[ "$do_pull" =~ ^[Yy] ]]; then
+    if ! run acli pull:db "${ACQUIA_APP}.${EFFECTIVE_ENV}" --no-interaction; then
+      warn "acli pull:db failed. Refresh the DB manually from the Cloud UI before continuing."
+      confirm "Continue anyway?"
+    else
+      ok "DB refreshed on ${EFFECTIVE_ENV}."
+    fi
+  else
+    info "Skipping DB refresh. Make sure ${EFFECTIVE_ENV} already has prod-like data."
+  fi
+
+  info "Triggering Acquia Cloud on-demand DB backup (${ACQUIA_APP}.${EFFECTIVE_ENV})"
+  if ! run acli api:environments:database-backup-create \
+         "${ACQUIA_APP}.${EFFECTIVE_ENV}" default; then
+    warn "acli backup call failed. You can also trigger one manually from
+       the Acquia Cloud UI before continuing. Acquia's nightly backups
+       remain in place either way."
+    confirm "Continue without an on-demand backup?"
+  fi
+
+  # Poll until the most recent backup reports state=completed (or we time out).
+  if [[ "$DRY_RUN" == "0" ]]; then
+    info "Waiting for the backup to finish (polling every 10s, up to 10 min)…"
+    local tries=0 max_tries=60 latest state=""
+    while (( tries < max_tries )); do
+      latest="$(acli api:environments:database-backups \
+                 "${ACQUIA_APP}.${EFFECTIVE_ENV}" default --limit=1 2>/dev/null \
+               || echo '[]')"
+      state="$(printf '%s' "$latest" \
+               | jq -r 'if type=="array" then .[0] else (._embedded.items[0] // .) end | (.completed_at // .completedAt // .completed // .state // "")' 2>/dev/null \
+               || echo "")"
+      if [[ -n "$state" && "$state" != "null" && "$state" != "in-progress" && "$state" != "queued" ]]; then
+        ok "Backup ready (state: ${state})."
+        break
+      fi
+      ((++tries))
+      sleep 10 2>/dev/null || true
+    done
+    if (( tries >= max_tries )); then
+      warn "Backup did not report completed within 10 minutes. Check the Cloud UI."
+      confirm "Continue anyway?"
+    fi
+  fi
+
+  cat <<EOF
+
+If anything goes wrong on ${ACQUIA_APP}.${EFFECTIVE_ENV} after this point:
+  1. Restore the pre-migration DB:  acli pull:db ${ACQUIA_APP}.${EFFECTIVE_ENV}
+  2. Revert the migration commit:   git revert <commit> && git push
+  3. Wait for your Acquia workflow to redeploy.
+This toolkit does NOT ship an automated rollback — the steps above are
+strictly safer and use Acquia's own tooling.
+
+EOF
+
+  phase_done_mark backup
+}
+
+# =============================================================================
+# PHASE E — Configure: prompt for SearchStax credentials
+# =============================================================================
+
+phase_configure() {
+  header "configure" "${PHASE_DESC[configure]}"
+  if phase_done_check configure; then phase_skip_done configure; return 0; fi
+  guard_against_prod
+
+  cat <<EOF
+Where to find SearchStax credentials:
+  • App endpoint URL & tokens : SearchStax Studio → Settings → Search & Indexing
+  • Analytics URL & key       : SearchStax Studio → Settings → Analytics API
+
+If you don't have an app yet, contact your Acquia TAM or open a support ticket.
+EOF
+
+  if [[ -z "${SEARCHSTAX_APP_ENDPOINT:-}" ]]; then
+    ask "SearchStax App endpoint URL (https://...)" SEARCHSTAX_APP_ENDPOINT
+  fi
+  if [[ -z "${SEARCHSTAX_READ_TOKEN:-}" ]]; then
+    ask_secret "SearchStax read token" SEARCHSTAX_READ_TOKEN
+  fi
+  if [[ -z "${SEARCHSTAX_WRITE_TOKEN:-}" ]]; then
+    ask_secret "SearchStax write token" SEARCHSTAX_WRITE_TOKEN
+  fi
+  if [[ -z "${SEARCHSTAX_ANALYTICS_URL:-}" ]]; then
+    ask "SearchStax analytics URL (or press Enter to skip)" SEARCHSTAX_ANALYTICS_URL ""
+  fi
+  if [[ -z "${SEARCHSTAX_ANALYTICS_KEY:-}" && -n "$SEARCHSTAX_ANALYTICS_URL" ]]; then
+    ask_secret "SearchStax analytics key" SEARCHSTAX_ANALYTICS_KEY
+  fi
+
+  if [[ -z "${SECRET_STORAGE:-}" ]]; then
+    ask_choice "How should the analytics key be stored?" SECRET_STORAGE \
+      "key (Key module — recommended, per Acquia docs)" \
+      "plain (write to searchstax.settings.analytics_key directly)"
+    SECRET_STORAGE="${SECRET_STORAGE%% *}"
+  fi
+
+  # Persist non-secret config back to migration.env (without overwriting user comments).
+  _save_env_var SEARCHSTAX_APP_ENDPOINT "$SEARCHSTAX_APP_ENDPOINT"
+  _save_env_var SEARCHSTAX_ANALYTICS_URL "$SEARCHSTAX_ANALYTICS_URL"
+  _save_env_var SECRET_STORAGE "$SECRET_STORAGE"
+
+  ok "Credentials captured (secrets held in-memory only — not written to migration.env)."
+  phase_done_mark configure
+}
+
+# Preserve secrets in-memory only; only non-secret values are persisted.
+# If the file doesn't exist, create it. If the key isn't present, append it.
+_save_env_var() {
+  local key="$1" val="$2"
+  local envfile="$ENV_FILE"
+  if [[ ! -f "$envfile" ]]; then
+    printf '# srsx-migrate runtime config (created %s)\n' "$(date)" > "$envfile"
+  fi
+  if grep -q "^${key}=" "$envfile"; then
+    # Use a temp file rather than sed -i to stay portable across BSD/GNU.
+    awk -v k="$key" -v v="$val" \
+      'BEGIN{FS=OFS="="} $1==k{print k"=\""v"\""; next} {print}' \
+      "$envfile" > "${envfile}.tmp" && mv "${envfile}.tmp" "$envfile"
+  else
+    printf '%s="%s"\n' "$key" "$val" >> "$envfile"
+  fi
+}
+
+# =============================================================================
+# PHASE F — Server: create the SearchStax-backed search_api server config
+# =============================================================================
+
+phase_server() {
+  header "server" "${PHASE_DESC[server]}"
+  if phase_done_check server; then phase_skip_done server; return 0; fi
+  guard_against_prod
+
+  [[ -n "${SEARCHSTAX_APP_ENDPOINT:-}" ]] || \
+    err "SEARCHSTAX_APP_ENDPOINT is empty. Run 'srsx-migrate configure' first."
+
+  for_each_site _phase_server_site
+  phase_done_mark server
+}
+
+_phase_server_site() {
+  local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
+  local tmpl="${SCRIPT_DIR}/templates/search_api.server.searchstax.yml.tmpl"
+  [[ -f "$tmpl" ]] || err "Server template missing: $tmpl"
+
+  local out="${ARTIFACTS_DIR}/server-${server_id}.yml"
+  mkdir -p "$ARTIFACTS_DIR"
+  # Minimal template substitution.
+  sed -e "s|@@ID@@|${server_id}|g" \
+      -e "s|@@NAME@@|SearchStax Cloud|g" \
+      -e "s|@@ENDPOINT@@|${SEARCHSTAX_APP_ENDPOINT}|g" \
+      "$tmpl" > "$out"
+
+  info "Importing server config from ${out}"
+  # Use config:import via php:script because `drush cset` cannot create whole entities.
+  SRSX_YAML_FILE="$out" SRSX_CONFIG_NAME="search_api.server.${server_id}" \
+    drush php:script "${SCRIPT_DIR}/lib/php-eval/import-config-yaml.php"
+
+  drush cr
+  # Verify
+  local got
+  drush_capture got config:get "search_api.server.${server_id}" --format=json
+  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
+    if printf '%s' "$got" | jq -e '.backend_config' >/dev/null 2>&1; then
+      ok "Server search_api.server.${server_id} created and reachable."
+    else
+      warn "Server config did not import cleanly. Falling back to manual UI step:
+        Visit /admin/config/search/solr-to-searchstax-ss-migration in the Drupal admin UI
+        and follow ${PHASE_DOC[server]}"
+      confirm "Once you've completed the UI migration, press Enter to continue"
+    fi
+  else
+    ok "Server config import simulated."
+  fi
+}
+
+# =============================================================================
+# PHASE G — Index: clone legacy index → SearchStax-backed copy + reindex
+# =============================================================================
+
+phase_index() {
+  header "index" "${PHASE_DESC[index]}"
+  if phase_done_check index; then phase_skip_done index; return 0; fi
+  guard_against_prod
+  for_each_site _phase_index_site
+  phase_done_mark index
+}
+
+_phase_index_site() {
+  local idx_json
+  drush_capture idx_json sapi-i --format=json
+
+  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
+    local legacy_ids
+    legacy_ids=$(printf '%s' "$idx_json" \
+      | jq -r 'to_entries[] | select(.value.server | startswith("searchstax") | not) | .key' \
+      || true)
+    if [[ -z "$legacy_ids" ]]; then
+      warn "No legacy (non-SearchStax) indexes found. Nothing to clone."
+      return 0
+    fi
+    while IFS= read -r idx; do
+      info "Cloning index: ${idx}"
+      SRSX_INDEX_ID="$idx" SRSX_NEW_SERVER_ID="${SRSX_NEW_SERVER_ID:-searchstax_server}" \
+        drush php:script "${SCRIPT_DIR}/lib/php-eval/clone-index.php"
+    done <<< "$legacy_ids"
+  else
+    audit "drush php:script lib/php-eval/clone-index.php  # for each legacy index"
+  fi
+
+  drush cr
+
+  # Reindex the new copies.
+  local new_json
+  drush_capture new_json sapi-i --format=json
+  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
+    local new_ids
+    new_ids=$(printf '%s' "$new_json" \
+      | jq -r 'to_entries[] | select(.value.server | startswith("searchstax")) | .key' \
+      || true)
+    while IFS= read -r idx; do
+      [[ -z "$idx" ]] && continue
+      info "Reindexing: ${idx}"
+      drush sapi-c "$idx"
+      drush sapi-r "$idx"
+      drush sapi-i "$idx"
+    done <<< "$new_ids"
+  else
+    audit "drush sapi-c <new>; drush sapi-r <new>; drush sapi-i <new>"
+  fi
+
+  ok "Index cloning + reindex complete."
+}
+
+# =============================================================================
+# PHASE H — Views: switch every Search-API view to its new index
+# =============================================================================
+
+phase_views() {
+  header "views" "${PHASE_DESC[views]}"
+  if phase_done_check views; then phase_skip_done views; return 0; fi
+  guard_against_prod
+  for_each_site _phase_views_site
+  phase_done_mark views
+}
+
+_phase_views_site() {
+  drush php:script "${SCRIPT_DIR}/lib/php-eval/switch-view-index.php"
+  drush cr
+  ok "Views switched to SearchStax-backed indexes."
+}
+
+# =============================================================================
+# PHASE I — Route: enable SearchStudio + analytics
+# =============================================================================
+
+phase_route() {
+  header "route" "${PHASE_DESC[route]}"
+  if phase_done_check route; then phase_skip_done route; return 0; fi
+  guard_against_prod
+  for_each_site _phase_route_site
+  phase_done_mark route
+}
+
+_phase_route_site() {
+  # Verified config keys from searchstax.schema.yml.
+  drush cset -y searchstax.settings searches_via_searchstudio 1
+  drush cset -y searchstax.settings configure_via_searchstudio 0
+
+  if [[ -n "${SEARCHSTAX_ANALYTICS_URL:-}" ]]; then
+    drush cset -y searchstax.settings analytics_url "${SEARCHSTAX_ANALYTICS_URL}"
+  fi
+
+  if [[ -n "${SEARCHSTAX_ANALYTICS_KEY:-}" ]]; then
+    case "${SECRET_STORAGE:-key}" in
+      key)
+        info "Storing analytics key as a Key module entity"
+        SRSX_KEY_VALUE="${SEARCHSTAX_ANALYTICS_KEY}" \
+          drush php:script "${SCRIPT_DIR}/lib/php-eval/create-key-entity.php"
+        drush cset -y searchstax.settings key_id "searchstax_analytics_key"
+        ;;
+      plain)
+        warn "Storing analytics key as plain config (NOT recommended for prod)"
+        drush cset -y searchstax.settings analytics_key "${SEARCHSTAX_ANALYTICS_KEY}"
+        ;;
+      *)
+        err "Unknown SECRET_STORAGE: ${SECRET_STORAGE}"
+        ;;
+    esac
+  fi
+
+  drush cr
+  ok "SearchStudio routing enabled${DRUSH_URI:+ on ${DRUSH_URI}}."
+}
+
+# =============================================================================
+# PHASE K — Validate: server URL, item counts, view bindings
+# =============================================================================
+
+phase_validate() {
+  header "validate" "${PHASE_DESC[validate]}"
+  # validate is read-only, so it does NOT call guard_against_prod — it's the
+  # one phase that's safe to run against any env (including prod) via
+  # `./srsx-migrate validate --env prod`.
+  for_each_site _phase_validate_site
+  if [[ "${SRSX_VALIDATE_FAIL:-0}" -gt 0 ]]; then
+    err "Validation failed: ${SRSX_VALIDATE_FAIL} issue(s). See log: ${LOG_FILE}"
+  fi
+  ok "All validation checks passed on ${ACQUIA_APP}.${EFFECTIVE_ENV}."
+  # Don't write done-validate marker when checking a non-default env, so the
+  # default-env validate marker isn't poisoned by a prod check.
+  if [[ "$EFFECTIVE_ENV" == "$ACQUIA_TARGET_ENV" ]]; then
+    phase_done_mark validate
+  fi
+}
+
+SRSX_VALIDATE_FAIL=0
+_phase_validate_site() {
+  local servers indexes views
+  drush_capture servers sapi-s --format=json
+  drush_capture indexes sapi-i --format=json
+
+  # Server URL must contain searchstax.com.
+  local hosts
+  hosts=$(printf '%s' "$servers" \
+    | jq -r '.[].backend_config.connector_config.host // .[].backend_config.host // empty' \
+    2>/dev/null || true)
+  if [[ -n "$hosts" ]] && ! grep -q "searchstax.com" <<<"$hosts"; then
+    warn "No server host contains 'searchstax.com' (${hosts})"
+    SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
+  else
+    ok "Server hosts contain searchstax.com"
+  fi
+
+  # Each searchstax-backed index must have count > 0.
+  local rows
+  rows=$(printf '%s' "$indexes" \
+    | jq -r 'to_entries[] | select(.value.server | startswith("searchstax")) | "\(.key) \(.value.count // 0)"' \
+    2>/dev/null || true)
+  while IFS=' ' read -r idx cnt; do
+    [[ -z "$idx" ]] && continue
+    if [[ "$cnt" =~ ^[0-9]+$ ]] && (( cnt > 0 )); then
+      ok "Index ${idx}: ${cnt} items"
+    else
+      warn "Index ${idx}: 0 items — indexing not complete"
+      SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
+    fi
+  done <<< "$rows"
+}
+
+# =============================================================================
+# PHASE M — Handoff: pull config from target env, stage git changes,
+#            then HAND OFF promotion to the customer's CI/CD.
+#            This phase does NOT git commit and NOT git push.
+# =============================================================================
+
+# Detect which directory in the local repo holds Drupal's config sync YAMLs.
+_detect_config_dir() {
+  local d
+  for d in config/sync config/default config docroot/sites/default/config web/sites/default/config; do
+    if [[ -d "${REPO_ROOT}/${d}" ]]; then
+      printf '%s' "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+phase_handoff() {
+  header "handoff" "${PHASE_DESC[handoff]}"
+  if phase_done_check handoff; then phase_skip_done handoff; return 0; fi
+  guard_against_prod
+
+  local config_dir
+  if ! config_dir="$(_detect_config_dir)"; then
+    err "No Drupal config sync directory found in ${REPO_ROOT}.
+       Looked for: config/sync, config/default, config, docroot/sites/default/config, web/sites/default/config
+       Create one (e.g. 'mkdir -p config/sync') and re-run."
+  fi
+  info "Local config sync dir: ${config_dir}"
+
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  local remote_dir="/tmp/srsx-handoff-${ts}"
+
+  info "Exporting config on ${ACQUIA_APP}.${EFFECTIVE_ENV} → ${remote_dir}"
+  drush cex --destination="$remote_dir" -y
+
+  info "Pulling config to ${REPO_ROOT}/${config_dir}"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "acli ssh ${ACQUIA_APP}.${EFFECTIVE_ENV} -- 'cd ${remote_dir} && tar -cf - .' | tar -xf - -C ${REPO_ROOT}/${config_dir}"
+  elif [[ "$DEMO" == "1" ]]; then
+    # Demo: copy fixture if available, else just touch a marker.
+    if [[ -d "${SRSX_DEMO_FIXTURES:-}/handoff-config" ]]; then
+      cp -R "${SRSX_DEMO_FIXTURES}/handoff-config/." "${REPO_ROOT}/${config_dir}/"
+    else
+      printf 'demo: 1\n' > "${REPO_ROOT}/${config_dir}/srsx.demo.yml"
+    fi
+  else
+    acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "cd '${remote_dir}' && tar -cf - ." \
+      | tar -xf - -C "${REPO_ROOT}/${config_dir}"
+  fi
+
+  ( cd "$REPO_ROOT" && run git add composer.json composer.lock 2>/dev/null || true )
+  ( cd "$REPO_ROOT" && run git add "$config_dir" )
+  ( cd "$REPO_ROOT" && run git status --short )
+
+  cat <<EOF
+
+─────────────────────────────────────────────────────────────
+  Migration validated on ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+
+  Next steps to take this live:
+
+    1. Review the staged changes:    git diff --staged
+    2. Commit:                       git commit -m "Search: migrate to SearchStax"
+    3. Push your migration branch:   git push origin <branch>
+    4. Deploy to higher environments through your normal Acquia workflow
+       (e.g. promote the code/config from dev → stage → prod).
+    5. After the prod deploy, run your standard smoke tests.
+    6. (Recommended) re-run validation against prod — read-only:
+         ./srsx-migrate validate --env prod
+─────────────────────────────────────────────────────────────
+EOF
+  phase_done_mark handoff
+}
+
+# =============================================================================
+# PHASE N — Cleanup: uninstall migration submodule + remove legacy
+# =============================================================================
+
+phase_cleanup() {
+  header "cleanup" "${PHASE_DESC[cleanup]}"
+  if phase_done_check cleanup; then phase_skip_done cleanup; return 0; fi
+  guard_against_prod
+  warn "Only run this after Phase 'validate' passes in PRODUCTION."
+  confirm "Proceed with legacy removal on ${ACQUIA_APP}.${EFFECTIVE_ENV}?"
+
+  for_each_site _phase_cleanup_site
+
+  # Composer remove (with safety guard).
+  if [[ "${KEEP_ACQUIA_SEARCH_IN_COMPOSER:-0}" == "1" ]]; then
+    warn "KEEP_ACQUIA_SEARCH_IN_COMPOSER=1 — leaving acquia_search in composer.json."
+  else
+    composer_in_repo remove --no-interaction drupal/acquia_search 2>/dev/null || \
+      warn "composer remove drupal/acquia_search failed (already gone?)"
+    composer_in_repo remove --no-interaction drupal/acquia_connector 2>/dev/null || \
+      warn "composer remove drupal/acquia_connector failed (already gone?)"
+  fi
+
+  composer_in_repo remove --no-interaction drupal/searchstax_solr_migration 2>/dev/null || true
+
+  ok "Cleanup complete. Commit + deploy, then delete the legacy Solr index from the Acquia Cloud UI."
+  phase_done_mark cleanup
+}
+
+_phase_cleanup_site() {
+  drush pmu -y solr_to_searchstax_ss_migration 2>/dev/null || \
+    warn "Could not uninstall solr_to_searchstax_ss_migration (already gone?)"
+  drush pmu -y acquia_search 2>/dev/null || \
+    warn "Could not uninstall acquia_search"
+  drush pmu -y acquia_connector 2>/dev/null || \
+    warn "Could not uninstall acquia_connector"
+  drush cex -y
+}
+
+# =============================================================================
+# DISPATCH
+# =============================================================================
+
+print_help() {
+  cat <<EOF
+${C_BOLD}${SCRIPT_NAME}${C_RST} v${SCRIPT_VERSION} — Acquia Search → SearchStax migration toolkit
+
+${C_BOLD}USAGE${C_RST}
+  ./srsx-migrate                  Interactive guided run (resume or start).
+  ./srsx-migrate init             (Re-)run the first-run setup wizard.
+  ./srsx-migrate <phase>          Run a single phase.
+  ./srsx-migrate all              Run all phases sequentially with prompts.
+  ./srsx-migrate validate --env <name>
+                                   Read-only validation against any env (incl. prod).
+  ./srsx-migrate status           Show "you are at <phase>; next: <phase>".
+  ./srsx-migrate explain <phase>  Print the Acquia doc URL the phase implements.
+  ./srsx-migrate --help           This message.
+  ./srsx-migrate --version        Show version and exit.
+
+${C_BOLD}PHASES${C_RST}  (run individually or via 'all')
+$(for p in "${PHASE_ORDER[@]}"; do printf '  %-12s %s\n' "$p" "${PHASE_DESC[$p]}"; done)
+
+${C_BOLD}GLOBAL FLAGS${C_RST}
+  --demo                          No real env; mocks drush/composer/acli/git.
+  --dry-run                       Real env; print commands without executing.
+  --no-color                      Disable ANSI colour output.
+  --yes, -y                       Auto-confirm all prompts (use with care).
+  --force                         Re-run a phase even if marked done.
+  --env <name>                    (validate only) Target a non-default env.
+
+${C_BOLD}WHAT THIS TOOLKIT DOES${C_RST}
+  Mutating phases run against the customer's Acquia DEV (or STAGE) environment
+  via 'acli remote:drush <app>.<env> -- ...'. The toolkit stops at 'handoff',
+  which stages the resulting git changes locally so you can review, commit,
+  and deploy them to higher environments through your normal Acquia workflow.
+
+${C_BOLD}ENVIRONMENT VARIABLES${C_RST}
+  NO_COLOR=1        Same as --no-color.
+
+${C_BOLD}REFERENCE${C_RST}
+  Migration runbook : ${MIGRATION_DOC}
+  Project           : https://github.com/acquia/search-stax-migration
+  Maintainer        : Mohammad Zomorodian, Acquia
+
+EOF
+}
+
+print_status() {
+  local last; last="$(state_get last-phase)"
+  if [[ -z "$last" ]]; then
+    info "No phase has run yet. Start with: ./srsx-migrate"
+    return 0
+  fi
+  info "Last completed phase: ${C_BOLD}${last}${C_RST}"
+  # Suggest next phase.
+  local i=0
+  for p in "${PHASE_ORDER[@]}"; do
+    if [[ "$p" == "$last" ]]; then
+      local next="${PHASE_ORDER[$((i+1))]:-(done)}"
+      info "Next:                 ${C_BOLD}${next}${C_RST}"
+      info "Run:                  ./srsx-migrate ${next}"
+      return 0
+    fi
+    ((++i))
+  done
+}
+
+print_explain() {
+  local phase="${1:-}"
+  [[ -n "$phase" ]] || err "Usage: ./srsx-migrate explain <phase>"
+  [[ -n "${PHASE_DESC[$phase]:-}" ]] || err "Unknown phase: ${phase}
+       Valid phases: ${PHASE_ORDER[*]}"
+  printf '%s%s%s\n' "$C_BOLD" "$phase" "$C_RST"
+  printf '  %s\n' "${PHASE_DESC[$phase]}"
+  printf '  Acquia doc: %s\n' "${PHASE_DOC[$phase]:-(none)}"
+}
+
+run_all() {
+  local started=0
+  local from="${RUN_FROM:-${PHASE_ORDER[0]}}"
+  for p in "${PHASE_ORDER[@]}"; do
+    if [[ "$started" == "0" ]]; then
+      if [[ "$p" == "$from" ]]; then
+        started=1
+      else
+        continue
+      fi
+    fi
+    case "$p" in
+      cleanup)
+        # Cleanup is dangerous; always pause before it.
+        confirm "About to run final cleanup (uninstall acquia_search etc.). Skip with Ctrl-C if not ready."
+        "phase_$p"
+        ;;
+      *)
+        "phase_$p"
+        demo_pause
+        ;;
+    esac
+  done
+}
+
+dispatch() {
+  case "${1:-interactive}" in
+    interactive)
+      ensure_init
+      resume_or_select
+      run_all
+      ;;
+    all)
+      ensure_init
+      RUN_FROM="${PHASE_ORDER[0]}"
+      run_all
+      ;;
+    init)
+      # Force the wizard to re-run by clearing the marker.
+      rm -f "${STATE_DIR}/init.done"
+      ACQUIA_APP=""; ACQUIA_TARGET_ENV=""
+      ensure_init
+      ;;
+    preflight|install|backup|configure|server|index|views|route|handoff|cleanup)
+      ensure_init
+      "phase_$1"
+      ;;
+    validate)
+      ensure_init
+      "phase_validate"
+      ;;
+    status)              print_status ;;
+    explain)             shift; print_explain "${1:-}" ;;
+    --help|-h|help)      print_help ;;
+    --version|-V)        printf '%s %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION" ;;
+    *)
+      err "Unknown command: $1
+       Run './srsx-migrate --help' for usage."
+      ;;
+  esac
+}
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+main() {
+  # Parse global flags first (in any order before the subcommand).
+  local -a positional=()
+  local env_override=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)   DRY_RUN=1; shift ;;
+      --demo)      enable_demo_mode; shift ;;
+      --no-color)  USE_COLOR=0; shift ;;
+      --yes|-y)    ASSUME_YES=1; shift ;;
+      --force)     FORCE=1; shift ;;
+      --env)
+        [[ $# -ge 2 ]] || err "--env requires a value (e.g. --env prod)"
+        env_override="$2"; shift 2 ;;
+      --env=*)     env_override="${1#--env=}"; shift ;;
+      --)          shift; positional+=("$@"); break ;;
+      *)           positional+=("$1"); shift ;;
+    esac
+  done
+
+  init_colors
+  load_env
+  load_demo_answers
+
+  # Set up logging (mirror everything to a per-run log).
+  mkdir -p "$LOG_DIR"
+  LOG_FILE="${LOG_DIR}/$(date +%Y%m%d-%H%M%S)-srsx.log"
+  exec > >(tee -a "$LOG_FILE") 2>&1
+  # Make sure the tee subshell flushes whatever we printed before the script
+  # exits — otherwise quick exits (e.g. "already complete") show nothing.
+  trap 'exec >&- 2>&-; wait 2>/dev/null || true' EXIT
+
+  # --env <name> is only honored by the read-only `validate` subcommand.
+  # Anywhere else it is silently ignored — we never let an arbitrary flag
+  # change the target of a mutating phase.
+  if [[ -n "$env_override" ]]; then
+    if [[ "${positional[0]:-}" == "validate" ]]; then
+      EFFECTIVE_ENV="$env_override"
+      if is_prod_env "$env_override"; then
+        ALLOW_PROD_ENV=1
+        warn "Running validate against production env '${env_override}' (read-only)."
+      fi
+    else
+      warn "--env is only honored by 'validate'. Ignored for '${positional[0]:-interactive}'."
+    fi
+  fi
+
+  dispatch "${positional[@]:-interactive}"
+}
+
+main "$@"

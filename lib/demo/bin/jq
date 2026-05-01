@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Demo shim for `jq`. Forwards to the real jq if present (so srsx-migrate's
+# JSON parsing of fixture output still works in --demo mode). Otherwise
+# performs a tiny subset to keep demos working without jq installed.
+set -euo pipefail
+if command -v /usr/bin/jq >/dev/null 2>&1; then
+  exec /usr/bin/jq "$@"
+fi
+if command -v /opt/homebrew/bin/jq >/dev/null 2>&1; then
+  exec /opt/homebrew/bin/jq "$@"
+fi
+# Last-ditch: pass JSON through unchanged.
+cat

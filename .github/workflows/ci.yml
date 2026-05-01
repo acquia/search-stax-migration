@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    name: Lint + demo smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and jq
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq
+
+      - name: Bash version
+        run: bash --version
+
+      - name: Lint (bash -n + shellcheck)
+        run: make lint
+
+      - name: Config-key drift check
+        run: make check
+
+      - name: Full demo end-to-end
+        run: make test
+
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: srsx-logs
+          path: logs/
+
+  docs-drift:
+    name: Docs ↔ phases drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify every phase is documented
+        run: bash tests/generate-docs.sh --check

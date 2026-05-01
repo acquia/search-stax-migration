@@ -1,0 +1,15 @@
+# Files generated at runtime by srsx-migrate (in customer repos):
+artifacts/
+logs/
+state/
+migration.env
+migration.env.bak*
+*.log
+
+# macOS noise
+.DS_Store
+
+# Editor noise
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,38 @@
+{
+  "default_index": {
+    "id": "default_index",
+    "name": "Default content index",
+    "server": "acquia_search_server",
+    "status": "Enabled",
+    "count": 1247,
+    "indexed": 1247,
+    "remaining": 0
+  },
+  "products_index": {
+    "id": "products_index",
+    "name": "Products",
+    "server": "acquia_search_server",
+    "status": "Enabled",
+    "count": 384,
+    "indexed": 384,
+    "remaining": 0
+  },
+  "default_index_searchstax": {
+    "id": "default_index_searchstax",
+    "name": "Default content index (SearchStax)",
+    "server": "searchstax_server",
+    "status": "Enabled",
+    "count": 1247,
+    "indexed": 1247,
+    "remaining": 0
+  },
+  "products_index_searchstax": {
+    "id": "products_index_searchstax",
+    "name": "Products (SearchStax)",
+    "server": "searchstax_server",
+    "status": "Enabled",
+    "count": 384,
+    "indexed": 384,
+    "remaining": 0
+  }
+}

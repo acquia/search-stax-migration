@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Demo shim for `git`. Only intercepts the writes srsx-migrate performs.
+# Reads (git rev-parse, etc.) fall through to the real git if available.
+set -euo pipefail
+case "${1:-}" in
+  add)     echo "(demo git) staged: ${*:2}" ;;
+  status)  echo "On branch demo
+Changes to be committed:
+  modified:   composer.json
+  modified:   composer.lock
+  modified:   config/sync/search_api.server.searchstax_server.yml
+  modified:   config/sync/searchstax.settings.yml" ;;
+  commit)  echo "(demo git) commit suppressed in --demo mode." ;;
+  push)    echo "(demo git) push suppressed in --demo mode." ;;
+  *)
+    if command -v /usr/bin/git >/dev/null 2>&1; then
+      exec /usr/bin/git "$@"
+    fi
+    echo "(demo git) ${*}"
+    ;;
+esac

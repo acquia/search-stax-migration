@@ -1,0 +1,18 @@
+Using version ^1.11 for drupal/searchstax
+./composer.json has been updated
+Running composer update drupal/searchstax drupal/search_api_solr drupal/key
+Loading composer repositories with package information
+Updating dependencies
+Lock file operations: 4 installs, 0 updates, 0 removals
+  - Locking drupal/searchstax (1.11.0)
+  - Locking drupal/search_api_solr (4.3.5)
+  - Locking drupal/key (1.19.0)
+  - Locking solarium/solarium (6.3.5)
+Writing lock file
+Installing dependencies from lock file (including require-dev)
+Package operations: 4 installs, 0 updates, 0 removals
+  - Installing solarium/solarium (6.3.5): Extracting archive
+  - Installing drupal/key (1.19.0): Extracting archive
+  - Installing drupal/search_api_solr (4.3.5): Extracting archive
+  - Installing drupal/searchstax (1.11.0): Extracting archive
+Generating autoload files

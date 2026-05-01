@@ -1,0 +1,2 @@
+[clone-index] OK: default_index -> default_index_searchstax
+[clone-index] OK: products_index -> products_index_searchstax

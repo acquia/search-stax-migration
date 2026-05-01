@@ -1,0 +1,14 @@
+{
+  "backend_config": {
+    "connector": "standard",
+    "connector_config": {
+      "scheme": "https",
+      "host": "ss123456-abcde-us-east-1-aws.searchstax.com",
+      "port": 443,
+      "path": "/solr/MyApp"
+    }
+  },
+  "id": "searchstax_server",
+  "name": "SearchStax Cloud",
+  "backend": "search_api_solr"
+}

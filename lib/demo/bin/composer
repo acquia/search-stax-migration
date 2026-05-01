@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Demo shim for `composer`.
+set -euo pipefail
+FIX="${SRSX_DEMO_FIXTURES:-$(cd "$(dirname "$0")/../fixtures" && pwd)}"
+case "${1:-}" in
+  require)  cat "$FIX/composer-require.txt" 2>/dev/null || echo "Package(s) installed (demo)." ;;
+  remove)   echo "Package(s) removed (demo): ${*:2}" ;;
+  install)  echo "Dependencies installed (demo)." ;;
+  show)     echo "(demo composer) ${*}" ;;
+  *)        echo "(demo composer) ${*}" ;;
+esac

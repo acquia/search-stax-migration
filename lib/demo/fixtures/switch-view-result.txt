@@ -1,0 +1,4 @@
+[switch-view-index] views.view.search:page_1  default_index -> default_index_searchstax
+[switch-view-index] views.view.products:page_1  products_index -> products_index_searchstax
+[switch-view-index] views.view.products:block_featured  products_index -> products_index_searchstax
+[switch-view-index] Updated 2 view config object(s).

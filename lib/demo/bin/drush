@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Demo shim for `drush`. Returns canned fixtures from $SRSX_DEMO_FIXTURES.
+# Activated when srsx-migrate runs with --demo (PATH is prepended with this dir).
+set -euo pipefail
+
+FIX="${SRSX_DEMO_FIXTURES:-$(cd "$(dirname "$0")/../fixtures" && pwd)}"
+
+emit() {
+  local f="$FIX/$1"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+  else
+    printf '{}\n'
+  fi
+}
+
+# Strip --uri=… and other global drush flags before matching the subcommand.
+args=()
+for a in "$@"; do
+  case "$a" in
+    --uri=*|--root=*|--format=*|-y|--yes|--no-interaction) ;;
+    --) ;;
+    *) args+=("$a") ;;
+  esac
+done
+sub="${args[0]:-}"
+
+case "$sub" in
+  status)         emit drush-status.json ;;
+  sapi-s|search-api:server-list)          emit drush-sapi-s.json ;;
+  sapi-i|search-api:index-list)
+    # If a state file says "after-clone", return the post-clone variant.
+    if [[ -f "$FIX/.state-after-clone" ]]; then
+      emit drush-sapi-i-after-clone.json
+    else
+      emit drush-sapi-i.json
+    fi
+    ;;
+  sapi-c|search-api:index-clear)          echo "Cleared index ${args[1]:-?}." ;;
+  sapi-r|search-api:index-reset-tracker)  echo "Reset tracker for ${args[1]:-(all)}." ;;
+  pm:list|pml)                            emit drush-pm-list.json ;;
+  config:get|cget)                        emit drush-config-get.json ;;
+  config:set|cset)                        echo "Set ${args[1]:-?} ${args[2]:-?} = ${args[3]:-?}." ;;
+  config:export|cex)                      echo "Configuration successfully exported." ;;
+  config:import|cim)                      echo "Configuration successfully imported." ;;
+  cache:rebuild|cr)                       echo "Cache rebuild complete." ;;
+  pm:uninstall|pmu)                       echo "Uninstalled module ${args[1]:-?}." ;;
+  en|pm:enable|pm:install)                echo "Enabled module(s): ${args[*]:1}." ;;
+  sql:dump|sql-dump)                      echo "Database dump written." ;;
+  php:script)
+    f="${args[1]:-}"
+    case "$f" in
+      *clone-index.php)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
+      *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
+      *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
+      *import-config-yaml.php) echo "[import-config-yaml] Imported (demo)." ;;
+      *create-key-entity.php)  echo "[create-key-entity] Saved (demo)." ;;
+      *)                       echo "[php:script] Ran ${f} (demo)." ;;
+    esac
+    ;;
+  key-add)                                echo "Key added (demo)." ;;
+  *)                                      echo "(demo drush) ${sub} ${args[*]:1}" ;;
+esac

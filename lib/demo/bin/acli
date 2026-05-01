@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Demo shim for `acli` (Acquia CLI).
+set -euo pipefail
+case "${1:-}" in
+  api:environments:database-backup-create)
+    echo '{"message":"Backup queued (demo).","status":"queued"}'
+    ;;
+  api:environments:database-backups)
+    # Mimic the most-recent-backup payload. Marked completed so the poller exits fast.
+    echo '[{"id":"demo-backup-0001","state":"completed","completed_at":"2026-04-24T12:00:00Z"}]'
+    ;;
+  api:environments:find)
+    # Used by the install phase to confirm Acquia redeployed the pushed branch.
+    # Echo back whatever branch the env is "on" \u2014 in demo we accept any branch.
+    echo '{"vcs":{"path":"main","type":"branch"}}'
+    ;;
+  pull:db)
+    echo "(demo acli) pull:db ${*:2}"
+    echo "Database pulled (demo)."
+    ;;
+  api:applications:find)
+    cat <<'JSON'
+[
+  {"uuid":"00000000-0000-0000-0000-demoapp00001","name":"demoapp","hosting":{"id":"demohost"}}
+]
+JSON
+    ;;
+  auth:whoami)
+    echo '{"mail":"demo@example.com","name":"demo"}'
+    ;;
+  remote:drush)
+    # acli remote:drush <env> -- <args...>; forward to demo drush shim.
+    shift # remote:drush
+    shift # env
+    [[ "${1:-}" == "--" ]] && shift
+    exec "$(dirname "$0")/drush" "$@"
+    ;;
+  ssh)
+    # acli ssh <env> -- <command...>
+    shift # ssh
+    shift # env
+    [[ "${1:-}" == "--" ]] && shift
+    # Detect a tar pull pattern: "cd <dir> && tar -cf - ."
+    case "${*:-}" in
+      *"tar -cf - ."*|*"tar cf - ."*)
+        # Emit an empty tar archive so the consumer's `tar -xf -` succeeds.
+        if [[ -d "${SRSX_DEMO_FIXTURES:-}/handoff-config" ]]; then
+          tar -cf - -C "${SRSX_DEMO_FIXTURES}/handoff-config" .
+        else
+          # 1024 zero bytes = valid empty tar.
+          dd if=/dev/zero bs=1024 count=1 2>/dev/null
+        fi
+        ;;
+      *)
+        # Default: just echo what would have run.
+        echo "(demo acli ssh) ${*}" >&2
+        ;;
+    esac
+    ;;
+  *) echo "(demo acli) ${*}" ;;
+esac

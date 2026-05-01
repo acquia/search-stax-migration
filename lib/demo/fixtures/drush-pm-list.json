@@ -1,0 +1,9 @@
+{
+  "searchstax": {"name": "SearchStax", "status": "Enabled", "version": "1.11.0"},
+  "search_api": {"name": "Search API", "status": "Enabled", "version": "1.36.0"},
+  "search_api_solr": {"name": "Solr Search", "status": "Enabled", "version": "4.3.5"},
+  "key": {"name": "Key", "status": "Enabled", "version": "1.19.0"},
+  "acquia_connector": {"name": "Acquia Connector", "status": "Enabled", "version": "4.0.6"},
+  "acquia_search": {"name": "Acquia Search", "status": "Enabled", "version": "3.1.4"},
+  "solr_to_searchstax_ss_migration": {"name": "Solr to SearchStax migration", "status": "Enabled", "version": "1.11.0"}
+}

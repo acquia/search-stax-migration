@@ -1,0 +1,14 @@
+{
+  "acquia_search_server": {
+    "id": "acquia_search_server",
+    "name": "Acquia Search",
+    "status": "Enabled",
+    "backend": "search_api_solr"
+  },
+  "searchstax_server": {
+    "id": "searchstax_server",
+    "name": "SearchStax Cloud",
+    "status": "Enabled",
+    "backend": "search_api_solr"
+  }
+}
