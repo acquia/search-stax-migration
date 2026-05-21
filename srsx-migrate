@@ -885,7 +885,7 @@ EOF
 
   # Wait for Acquia to redeploy the env. The most reliable signal is that the
   # env's deployed VCS path matches the branch we just pushed.
-  if [[ "$DRY_RUN" == "0" ]]; then
+  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
     info "Waiting for Acquia to redeploy ${ACQUIA_APP}.${EFFECTIVE_ENV} with branch '${push_branch}' (polling every 15s, up to 10 min)…"
     local tries=0 max_tries=40 envinfo deployed=""
     while (( tries < max_tries )); do
@@ -962,7 +962,7 @@ EOF
   fi
 
   # Poll until the most recent backup reports state=completed (or we time out).
-  if [[ "$DRY_RUN" == "0" ]]; then
+  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
     info "Waiting for the backup to finish (polling every 10s, up to 10 min)…"
     local tries=0 max_tries=60 latest state=""
     while (( tries < max_tries )); do
