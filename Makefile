@@ -43,6 +43,9 @@ test:
 	    && echo "  demo end-to-end OK (log: /tmp/srsx-demo.log)" \
 	    || { tail -30 /tmp/srsx-demo.log; exit 1; }
 	@bash tests/test-resume-after-completion.sh
+	@bash tests/test-ssx-json-body.sh
+	@bash tests/test-provision-skip-when-endpoint-set.sh
+	@bash tests/test-provision-demo-skip.sh
 
 demo:
 	@./srsx-migrate --demo

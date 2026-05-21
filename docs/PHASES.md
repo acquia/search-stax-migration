@@ -38,6 +38,30 @@ That's the entire phase. Acquia takes nightly backups already; this just adds an
 
 **There is no automated rollback.** If anything goes wrong on dev/stage, restore the DB with `acli pull:db` and `git revert` the migration commit. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the exact steps.
 
+## `provision`
+
+Creates the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. **Optional** — short-circuits cleanly when any of these is true:
+
+- `--demo` mode is active (the toolkit never touches the network in demo)
+- `SEARCHSTAX_APP_ENDPOINT` is already set in `migration.env` or the environment (e.g. your TAM already provisioned an app)
+- You answer "no, I already have one" at the first prompt
+
+Otherwise the flow is:
+
+```
+POST  /api/rest/v2/obtain-auth-token/            (login; cached in state/searchstax.session, chmod 600)
+GET   /api/rest/v2/account/                       (account picker)
+GET   /api/rest/experience-manager/v1/plan_regions?account=…   (region picker)
+POST  /api/rest/experience-manager/v2/apps?account=…           (create — one per Drupal site)
+GET   /api/rest/experience-manager/v2/apps/<id>?account=…      (capture endpoint + tokens)
+```
+
+The first app's endpoint URL is written to `migration.env` as `SEARCHSTAX_APP_ENDPOINT`; tokens (read/write/analytics) are exported in-process so the next `configure` phase consumes them without re-prompting. Per the configure-phase contract, **tokens are never persisted to disk**.
+
+Resumability: the created app id is recorded to `state/provisioned-app-id` *before* the detail-fetch, so a crash between create and detail re-uses the existing app instead of creating a duplicate on the next run.
+
+> **Reverse-engineered.** Endpoints + body shapes were inferred from the SearchStudio SPA. The Drupal `searchstax` module does not expose app creation. If the API rev changes shape, `phase_provision` falls back to prompting the operator for the endpoint manually — same UX as before this phase existed.
+
 ## `configure`
 
 Interactive only. Asks for:

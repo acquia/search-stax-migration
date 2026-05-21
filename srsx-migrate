@@ -52,6 +52,7 @@ declare -A PHASE_DOC=(
   [preflight]="${DOCS_BASE}/preparing-migration-acquia-search-powered-searchstax"
   [install]="${DOCS_BASE}/installing-searchstax-module"
   [backup]="${DOCS_BASE}/preparing-migration-acquia-search-powered-searchstax"
+  [provision]="${DOCS_BASE}/migrating-acquia-search-powered-searchstax#provisioning-searchstax-apps"
   [configure]="${DOCS_BASE}/enabling-searchstax-module-and-routing-searches-through-it"
   [server]="${DOCS_BASE}/migrating-server-drupal-acquia-search-powered-searchstax"
   [index]="${DOCS_BASE}/migrating-index-drupal-acquia-search-powered-searchstax"
@@ -66,6 +67,7 @@ declare -A PHASE_DESC=(
   [preflight]="Run drush status, sapi-s, sapi-i, pm:list against the target Acquia env to verify versions and inventory the current Solr setup."
   [backup]="(Optional) refresh dev DB from prod with 'acli pull:db', then trigger an on-demand Acquia DB backup and wait for it to finish."
   [install]="composer require search_api/search_api_solr/searchstax/key locally, push the branch, wait for Acquia to deploy, then drush updb + cr + en the modules."
+  [provision]="Create the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. Auto-skipped if SEARCHSTAX_APP_ENDPOINT is already set or in --demo mode."
   [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
   [server]="Create the SearchStax-backed search_api server config."
   [index]="Clone each legacy index into a SearchStax-backed copy and reindex."
@@ -79,7 +81,7 @@ declare -A PHASE_DESC=(
 # Ordered list of phases for `all` and `status`. Backup runs BEFORE install
 # so the customer has a fresh restore point before any composer/drush change.
 readonly -a PHASE_ORDER=(
-  preflight backup install configure server index views route validate handoff cleanup
+  preflight backup install provision configure server index views route validate handoff cleanup
 )
 
 # Environment names treated as production. Mutating phases run against
@@ -99,6 +101,15 @@ FORCE=0                    # --force re-runs phases marked done.
 declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
 LOG_FILE=""
 
+# Outputs of lib/searchstax_api.sh helpers (assigned by ssx_create_one_app /
+# ssx_get_app_detail). Pre-declared here so shellcheck doesn't think
+# phase_provision references unset variables (the module is sourced below).
+ssx_last_app_id=""
+ssx_last_endpoint=""
+ssx_last_read_token=""
+ssx_last_write_token=""
+ssx_last_analytics_url=""
+
 # Acquia app + target env. Loaded from migration.env, captured by ensure_init() if blank.
 # EFFECTIVE_ENV is the env used for THIS invocation; defaults to ACQUIA_TARGET_ENV but
 # can be overridden by `--env <name>` on the validate subcommand only.
@@ -109,8 +120,9 @@ ALLOW_PROD_ENV=0           # Set true only by `validate --env <prodlike>` (read-
 
 # Dirs (created at runtime, gitignored). All derived from SRSX_HOME so that
 # `--demo` can rebase them under a throwaway tmpdir without touching the
-# toolkit's own files (migration.env, state/, logs/, artifacts/).
-SRSX_HOME="${SCRIPT_DIR}"
+# toolkit's own files (migration.env, state/, logs/, artifacts/). Tests may
+# also export SRSX_HOME to point at a sandbox dir.
+SRSX_HOME="${SRSX_HOME:-${SCRIPT_DIR}}"
 ARTIFACTS_DIR="${SRSX_HOME}/artifacts"
 LOG_DIR="${SRSX_HOME}/logs"
 STATE_DIR="${SRSX_HOME}/state"   # Tracks last completed phase, etc.
@@ -682,6 +694,12 @@ for_each_site() {
 # =============================================================================
 # (Scaffolding is install.sh's job; nothing to do here at runtime.)
 
+# SearchStax REST API helpers (sourced here so they can use the info/warn/err/
+# ok/ask/ask_secret/ask_choice/_save_env_var/state_get/state_set/STATE_DIR
+# helpers defined above).
+# shellcheck source=lib/searchstax_api.sh disable=SC1091
+source "${SCRIPT_DIR}/lib/searchstax_api.sh"
+
 # =============================================================================
 # PHASE B — Preflight: drush status, inventory, multisite detect
 # =============================================================================
@@ -954,6 +972,164 @@ EOF
 }
 
 # =============================================================================
+# PHASE E1 — Provision: create the SearchStax app(s) via the REST API
+# =============================================================================
+#
+# This phase is *optional* in practice: many customers already have an app
+# provisioned by their TAM. The phase short-circuits cleanly in three cases:
+#
+#   1. --demo mode             — never touch the network.
+#   2. SEARCHSTAX_APP_ENDPOINT  already set in migration.env / env.
+#   3. Operator answers "no, I already have one" at the first prompt.
+#
+# Otherwise it logs into SearchStax (cached session in state/searchstax.session
+# to avoid burning a fresh 2FA TOTP on retries), picks account/env/region,
+# derives one default app name per Drupal site, and POSTs to
+# /experience-manager/v2/apps. On success it GETs /apps/<id>, extracts the
+# Solr endpoint URL + read/write tokens, and saves the endpoint to
+# migration.env so phase_configure can pick it up without another prompt.
+#
+# Resumability: the created app id is recorded to state/provisioned-app-id
+# *before* the detail-fetch, so a crash between POST and GET re-uses the
+# existing app instead of creating a duplicate on the next run.
+phase_provision() {
+  header "provision" "${PHASE_DESC[provision]}"
+  if phase_done_check provision; then phase_skip_done provision; return 0; fi
+
+  # 1. Demo mode never reaches the network. lib/demo/bin/curl is a tripwire
+  #    shim that fails the build if this guard ever regresses.
+  if [[ "$DEMO" == "1" ]]; then
+    ok "Demo mode — skipping SearchStax API calls."
+    phase_done_mark provision
+    return 0
+  fi
+
+  # 2. Endpoint already configured (previous run, TAM-provisioned app, or a
+  #    standalone create-apps invocation by the operator).
+  if [[ -n "${SEARCHSTAX_APP_ENDPOINT:-}" ]]; then
+    ok "App endpoint already configured (${SEARCHSTAX_APP_ENDPOINT}). Skipping provisioning."
+    phase_done_mark provision
+    return 0
+  fi
+
+  # 3. Let the operator opt out.
+  local choice
+  ask_choice "Do you want srsx-migrate to create a SearchStax app for you?" choice \
+    "yes — create one (or more) apps via the SearchStax REST API" \
+    "no  — I already have an app; I'll paste the endpoint in 'configure'"
+  case "$choice" in
+    no*|No*)
+      info "Skipping app creation. Make sure your endpoint + tokens are ready for the next phase."
+      info "  Find them in SearchStudio → Settings → Search & Indexing / Analytics API."
+      phase_done_mark provision
+      return 0
+      ;;
+  esac
+
+  require_cmd jq
+  require_cmd curl
+
+  ssx_login
+  ssx_pick_account
+  ssx_pick_environment
+  ssx_pick_region
+
+  # Derive one default app name per site (or one total for single-site).
+  local -a default_names=()
+  if (( ${#SITES_ARR[@]} == 0 )); then
+    default_names+=("$(_ssx_default_app_name "")")
+  else
+    local s
+    for s in "${SITES_ARR[@]}"; do
+      default_names+=("$(_ssx_default_app_name "$s")")
+    done
+  fi
+
+  # Let the operator edit each name. Re-validate after edit; if still
+  # invalid, suggest a sanitised version and ask once more before erroring.
+  local -a app_names=()
+  local n edited suggested
+  for n in "${default_names[@]}"; do
+    ask "App name to create" edited "$n"
+    if ! ssx_validate_name "$edited"; then
+      suggested="$(printf '%s' "$edited" | tr -c 'A-Za-z0-9_' '_')"
+      ask "Corrected app name" edited "$suggested"
+      ssx_validate_name "$edited" || err "App name '$edited' is still invalid."
+    fi
+    app_names+=("$edited")
+  done
+
+  info "About to create ${#app_names[@]} SearchStax app(s) on account '$SSX_ACCOUNT' (env: $SSX_ENV, region id: $SSX_REGION_ID):"
+  for n in "${app_names[@]}"; do dim "  • $n"; done
+  confirm "Proceed?"
+
+  # Resume support: re-use a previously-created-but-not-fully-captured app.
+  local resumed_id
+  resumed_id="$(state_get provisioned-app-id)"
+
+  local created_endpoint=""
+  local app_id
+  for n in "${app_names[@]}"; do
+    app_id=""
+    if [[ -n "$resumed_id" ]]; then
+      info "Resuming app id '$resumed_id' (created by a previous run)."
+      app_id="$resumed_id"
+      resumed_id=""
+    else
+      ssx_create_one_app "$n" || err "Failed to create app '$n'. Aborting."
+      app_id="$ssx_last_app_id"
+      [[ -n "$app_id" ]] && state_set provisioned-app-id "$app_id"
+    fi
+
+    # First created app's endpoint is what srsx-migrate writes to
+    # migration.env. Additional per-site apps are still created; their
+    # endpoints would be wired in by per-site config (out of scope for v1).
+    if [[ -z "$created_endpoint" ]] && [[ -n "$app_id" ]] && ssx_get_app_detail "$app_id"; then
+      created_endpoint="$ssx_last_endpoint"
+      _save_env_var SEARCHSTAX_APP_ENDPOINT "$created_endpoint"
+      [[ -n "$ssx_last_analytics_url" ]] && _save_env_var SEARCHSTAX_ANALYTICS_URL "$ssx_last_analytics_url"
+      # Pass tokens through env to phase_configure (in-memory only;
+      # NEVER written to migration.env per the configure-phase contract).
+      export SEARCHSTAX_APP_ENDPOINT="$created_endpoint"
+      [[ -n "$ssx_last_read_token"    ]] && export SEARCHSTAX_READ_TOKEN="$ssx_last_read_token"
+      [[ -n "$ssx_last_write_token"   ]] && export SEARCHSTAX_WRITE_TOKEN="$ssx_last_write_token"
+      [[ -n "$ssx_last_analytics_url" ]] && export SEARCHSTAX_ANALYTICS_URL="$ssx_last_analytics_url"
+      ok "Captured endpoint: $created_endpoint"
+    fi
+
+    rm -f "${STATE_DIR}/provisioned-app-id"
+  done
+
+  if [[ -z "$created_endpoint" ]] && [[ "${DRY_RUN:-0}" == "0" ]]; then
+    warn "App(s) created, but the endpoint URL could not be auto-extracted."
+    warn "  Look it up in SearchStudio → Settings → Search & Indexing,"
+    warn "  then paste it when 'configure' prompts you."
+  fi
+
+  phase_done_mark provision
+}
+
+# Derive a default app name. Server rule: 6..126 chars of [A-Za-z0-9_].
+# Empty `site` means single-site.
+_ssx_default_app_name() {
+  local site="$1"
+  local base="${ACQUIA_APP:-app}"
+  local env_part="${ACQUIA_TARGET_ENV:-dev}"
+  local raw
+  if [[ -n "$site" && "$site" != "default" ]]; then
+    raw="${base}_${site}_${env_part}"
+  else
+    raw="${base}_${env_part}"
+  fi
+  local clean
+  clean="$(printf '%s' "$raw" | tr -c 'A-Za-z0-9_' '_')"
+  while (( ${#clean} < 6 )); do
+    clean="${clean}_"
+  done
+  printf '%s\n' "$clean"
+}
+
+# =============================================================================
 # PHASE E — Configure: prompt for SearchStax credentials
 # =============================================================================
 
@@ -967,7 +1143,9 @@ Where to find SearchStax credentials:
   • App endpoint URL & tokens : SearchStax Studio → Settings → Search & Indexing
   • Analytics URL & key       : SearchStax Studio → Settings → Analytics API
 
-If you don't have an app yet, contact your Acquia TAM or open a support ticket.
+If you don't have an app yet, re-run './srsx-migrate provision' first — it
+automates app creation via the SearchStax REST API and pre-populates the
+endpoint + tokens this phase would otherwise prompt for.
 EOF
 
   if [[ -z "${SEARCHSTAX_APP_ENDPOINT:-}" ]]; then
@@ -1482,7 +1660,7 @@ dispatch() {
       ACQUIA_APP=""; ACQUIA_TARGET_ENV=""
       ensure_init
       ;;
-    preflight|install|backup|configure|server|index|views|route|handoff|cleanup)
+    preflight|install|backup|provision|configure|server|index|views|route|handoff|cleanup)
       ensure_init
       "phase_$1"
       ;;

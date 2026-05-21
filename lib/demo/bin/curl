@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# lib/demo/bin/curl — tripwire shim for --demo mode.
+#
+# phase_provision short-circuits in demo mode and MUST NOT reach any real
+# HTTP. If a regression ever lets it through, this shim fails loudly with
+# a clear message instead of silently calling out to app.searchstax.com.
+#
+# Real curl in demo mode is never needed by srsx-migrate.
+
+printf 'srsx-migrate demo tripwire: curl invoked in --demo mode.\n' >&2
+printf '  args: %s\n' "$*" >&2
+printf '  This should never happen — phase_provision must short-circuit in demo.\n' >&2
+exit 97
