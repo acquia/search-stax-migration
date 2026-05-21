@@ -98,6 +98,7 @@ DEMO=0
 USE_COLOR=1
 ASSUME_YES=0
 FORCE=0                    # --force re-runs phases marked done.
+PHASE_START_TIME=0         # Unix timestamp when current phase started (set by header()).
 declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
 LOG_FILE=""
 
@@ -156,25 +157,32 @@ init_colors() {
 }
 
 # Phase header — call as `header "preflight" "Verify environment"`.
+# Stores the start time for later duration calculation.
 header() {
   local phase="$1" subtitle="${2:-}"
-  printf '\n'
+  PHASE_START_TIME="$(date +%s)"
+  printf '\n%s' "$C_HEAD"
+  printf '═%.0s' {1..71}
+  printf '%s\n' "$C_RST"
   if [[ "$DEMO" == "1" ]]; then
     printf '%s[DEMO MODE — no real changes]%s\n' "$C_WARN" "$C_RST"
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '%s[DRY RUN — commands not executed]%s\n' "$C_WARN" "$C_RST"
   fi
-  printf '%s▶ Phase: %s%s%s\n' "$C_HEAD" "$C_BOLD" "$phase" "$C_RST"
-  [[ -n "$subtitle" ]] && printf '  %s\n' "$subtitle"
+  printf '%s▶ Phase: %s%s%s' "$C_HEAD" "$C_BOLD" "$phase" "$C_RST"
+  [[ -n "$subtitle" ]] && printf ' — %s' "$subtitle"
+  printf '\n'
   if [[ -n "${ACQUIA_APP:-}" && -n "${EFFECTIVE_ENV:-}" ]]; then
-    printf '  %sOperating against: %s%s.%s%s\n' \
+    printf '  %sTarget:  %s%s.%s%s\n' \
       "$C_DIM" "$C_BOLD" "${ACQUIA_APP}" "${EFFECTIVE_ENV}" "$C_RST"
   fi
   if [[ -n "${PHASE_DOC[$phase]:-}" ]]; then
-    printf '  %sdoc: %s%s\n' "$C_DIM" "${PHASE_DOC[$phase]}" "$C_RST"
+    printf '  %sDoc:     %s%s\n' "$C_DIM" "${PHASE_DOC[$phase]}" "$C_RST"
   fi
-  printf '\n'
+  printf '%s' "$C_HEAD"
+  printf '═%.0s' {1..71}
+  printf '%s\n' "$C_RST"
 }
 
 ok()   { printf '%s[OK]%s %s\n' "$C_OK" "$C_RST" "$*"; }
@@ -587,9 +595,29 @@ phase_done_check() {
 }
 
 phase_done_mark() {
+  phase_footer "$1"
   mkdir -p "$STATE_DIR"
   : > "${STATE_DIR}/done-$1"
   state_set "last-phase" "$1"
+}
+
+# Print phase completion summary with elapsed time.
+phase_footer() {
+  local phase="$1"
+  local end_time="$(date +%s)"
+  local elapsed=$((end_time - PHASE_START_TIME))
+  local mins=$((elapsed / 60))
+  local secs=$((elapsed % 60))
+  printf '\n%s' "$C_HEAD"
+  printf '═%.0s' {1..71}
+  printf '%s\n' "$C_RST"
+  printf '%s✓ Phase %s%s%s complete' "$C_OK" "$C_BOLD" "'$phase'" "$C_RST"
+  if (( elapsed > 0 )); then
+    printf ' (%dm %ds)' "$mins" "$secs"
+  fi
+  printf '\n%s' "$C_HEAD"
+  printf '═%.0s' {1..71}
+  printf '%s\n' "$C_RST"
 }
 
 phase_done_clear() {
