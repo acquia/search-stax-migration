@@ -58,4 +58,29 @@ ssx_validate_name "acme_client01_dev" || { echo "FAIL: valid name rejected"; exi
 ! ssx_validate_name "short"            2>/dev/null  || { echo "FAIL: <6 chars accepted"; exit 1; }
 ! ssx_validate_name "has spaces here"  2>/dev/null  || { echo "FAIL: spaces accepted"; exit 1; }
 
+# Optional fields must be OMITTED when their env vars are empty (the server
+# applies its own defaults; we don't want to send empty strings).
+for key in platform_version_id uid api_password engine_password; do
+    if jq -e "has(\"$key\")" <<<"$body" >/dev/null; then
+        echo "FAIL: optional key '$key' should be omitted when env is empty"
+        echo "  body: $body"
+        exit 1
+    fi
+done
+
+# When the env vars ARE set (parity with create_apps.sh's --platform-version-id,
+# --deployment-uid, --api-password, --engine-password flags), they MUST appear
+# in the body with the right types.
+SSX_PLATFORM_VERSION_ID=7
+SSX_DEPLOYMENT_UID="dep-abc-123"
+SSX_API_PASSWORD="api-secret"
+SSX_ENGINE_PASSWORD="engine-secret"
+body2="$(ssx_build_create_body "acme_client01_dev")"
+
+[[ "$(jq -r '.platform_version_id'        <<<"$body2")" == "7"             ]] || { echo "FAIL: platform_version_id value"; exit 1; }
+[[ "$(jq -r '.platform_version_id | type' <<<"$body2")" == "number"        ]] || { echo "FAIL: platform_version_id must be a number"; exit 1; }
+[[ "$(jq -r '.uid'                        <<<"$body2")" == "dep-abc-123"   ]] || { echo "FAIL: uid value"; exit 1; }
+[[ "$(jq -r '.api_password'               <<<"$body2")" == "api-secret"    ]] || { echo "FAIL: api_password value"; exit 1; }
+[[ "$(jq -r '.engine_password'            <<<"$body2")" == "engine-secret" ]] || { echo "FAIL: engine_password value"; exit 1; }
+
 echo "  ssx-json-body OK"

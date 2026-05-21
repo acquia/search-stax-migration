@@ -37,6 +37,15 @@ SSX_ENV="${SSX_ENV:-${SEARCHSTAX_ENVIRONMENT:-}}"
 SSX_REGION_ID="${SSX_REGION_ID:-${SEARCHSTAX_REGION_ID:-}}"
 SSX_APP_DEFAULT="${SSX_APP_DEFAULT:-false}"
 
+# Optional create-app fields. Honored only when set in env (parity with the
+# colleague's create_apps.sh CLI flags --platform-version-id, --deployment-uid,
+# --api-password, --engine-password). srsx-migrate does not prompt for these;
+# operators that want them set them in migration.env or the calling shell.
+SSX_PLATFORM_VERSION_ID="${SSX_PLATFORM_VERSION_ID:-${SEARCHSTAX_PLATFORM_VERSION_ID:-}}"
+SSX_DEPLOYMENT_UID="${SSX_DEPLOYMENT_UID:-${SEARCHSTAX_DEPLOYMENT_UID:-}}"
+SSX_API_PASSWORD="${SSX_API_PASSWORD:-${SEARCHSTAX_API_PASSWORD:-}}"
+SSX_ENGINE_PASSWORD="${SSX_ENGINE_PASSWORD:-${SEARCHSTAX_ENGINE_PASSWORD:-}}"
+
 # --- Outputs of ssx_create_one_app / ssx_get_app_detail -------------------
 # shellcheck disable=SC2034  # Consumed externally by phase_provision in srsx-migrate.
 ssx_last_app_id=""
@@ -359,12 +368,24 @@ ssx_validate_name() {
 # contract without firing an HTTP request.
 ssx_build_create_body() {
   local name="$1"
+  # Start with the always-present fields, then conditionally add the four
+  # optional create-time fields create_apps.sh exposes. Each optional field
+  # is added only when its env var is non-empty so the API request stays
+  # minimal (and so the server applies its own defaults).
   jq -nc \
     --arg name "$name" \
     --arg env "$SSX_ENV" \
     --argjson default "${SSX_APP_DEFAULT:-false}" \
     --argjson region "${SSX_REGION_ID:-0}" \
-    '{name: $name, default: $default, environment: $env, plan_region_id: $region}'
+    --arg platform "${SSX_PLATFORM_VERSION_ID:-}" \
+    --arg uid "${SSX_DEPLOYMENT_UID:-}" \
+    --arg api_pw "${SSX_API_PASSWORD:-}" \
+    --arg engine_pw "${SSX_ENGINE_PASSWORD:-}" \
+    '{name: $name, default: $default, environment: $env, plan_region_id: $region}
+     + (if $platform  != "" then {platform_version_id: ($platform|tonumber)} else {} end)
+     + (if $uid       != "" then {uid: $uid}                                   else {} end)
+     + (if $api_pw    != "" then {api_password: $api_pw}                       else {} end)
+     + (if $engine_pw != "" then {engine_password: $engine_pw}                 else {} end)'
 }
 
 # POST /experience-manager/v2/apps. On success, sets ssx_last_app_id and
