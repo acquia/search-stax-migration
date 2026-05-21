@@ -324,20 +324,20 @@ ask_choice() {
     printf '    [%d] %s\n' "$i" "$o"
     ((i++))
   done
-  local choice
+  local selected_index
   if (( ${#DEMO_ANSWERS_ARR[@]} > 0 )); then
-    choice="${DEMO_ANSWERS_ARR[0]}"
+    selected_index="${DEMO_ANSWERS_ARR[0]}"
     DEMO_ANSWERS_ARR=("${DEMO_ANSWERS_ARR[@]:1}")
-    info "  [scripted choice: ${choice}]"
+    info "  [scripted choice: ${selected_index}]"
   else
     printf '  Choice [1]: '
-    read -r choice || choice=1
-    [[ -z "$choice" ]] && choice=1
+    read -r selected_index || selected_index=1
+    [[ -z "$selected_index" ]] && selected_index=1
   fi
-  if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#opts[@]} )); then
-    err "Invalid choice: $choice"
+  if [[ ! "$selected_index" =~ ^[0-9]+$ ]] || (( selected_index < 1 || selected_index > ${#opts[@]} )); then
+    err "Invalid choice: $selected_index"
   fi
-  printf -v "$var" '%s' "${opts[$((choice-1))]}"
+  printf -v "$var" '%s' "${opts[$((selected_index-1))]}"
 }
 
 # Pause between phases when in --demo mode so the user can read the output
