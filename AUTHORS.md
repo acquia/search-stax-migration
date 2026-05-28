@@ -7,6 +7,9 @@
 
 Original author and current maintainer of `acquia/search-stax-migration`.
 
+**JP McNeal** — Acquia
+([GitHub](https://github.com/jpmcneal))
+
 ## Contributors
 
 Contributions are welcomed via pull request — see [CONTRIBUTING.md](CONTRIBUTING.md).
