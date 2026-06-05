@@ -22,9 +22,23 @@ That's this toolkit.
 
 ## Install
 
+**Public repo:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acquia/search-stax-migration/main/install.sh | bash
 ```
+
+**Private repo** — generate a [GitHub PAT](https://github.com/settings/tokens) with `repo` scope, then:
+
+```bash
+export GITHUB_TOKEN="ghp_..."
+curl -fsSL \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github.raw" \
+  "https://api.github.com/repos/acquia/search-stax-migration/contents/install.sh?ref=main" | bash
+```
+
+The installer detects `GITHUB_TOKEN` (or `GH_TOKEN`) automatically and uses the GitHub Contents API for every subsequent file download — no extra steps needed.
 
 This drops a self-contained toolkit at `tools/searchstax-migration/` inside your Drupal repository (sibling of `docroot/`). Run it from your Cloud IDE, DDEV, Lando, or local clone — anywhere `composer.json` is writable.
 

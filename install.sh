@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 # install.sh — bootstrap the Acquia Search → SearchStax migration toolkit.
 #
-# Usage:
+# Usage (public repo):
 #   curl -fsSL https://raw.githubusercontent.com/acquia/search-stax-migration/main/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/acquia/search-stax-migration/main/install.sh | bash -s -- --target /path/to/repo
+#
+# Usage (private repo — set GITHUB_TOKEN or GH_TOKEN before running):
+#   export GITHUB_TOKEN="ghp_..."
+#   curl -fsSL \
+#     -H "Authorization: Bearer $GITHUB_TOKEN" \
+#     -H "Accept: application/vnd.github.raw" \
+#     "https://api.github.com/repos/acquia/search-stax-migration/contents/install.sh?ref=main" | bash
+#
+# The installer automatically detects GITHUB_TOKEN / GH_TOKEN and uses the
+# GitHub Contents API for all subsequent file downloads, so the entire
+# installation works against a private repository without any extra steps.
 #
 # What this does:
 #   1. Detects the Acquia repo root (composer.json + docroot/) — or accepts --target.
@@ -24,6 +35,8 @@ set -euo pipefail
 REPO="${SRSX_REPO:-acquia/search-stax-migration}"
 REF="${SRSX_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+API_BASE="https://api.github.com/repos/${REPO}/contents"
+AUTH_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 TARGET=""
 DOCS_URL="https://docs.acquia.com/acquia-cloud-platform/migrating-acquia-search-powered-searchstax"
 
@@ -41,8 +54,7 @@ FILES=(
   "lib/demo/fixtures/drush-sapi-s.json"
   "lib/demo/fixtures/drush-sapi-i.json"
   "lib/demo/fixtures/drush-sapi-i-after-clone.json"
-  "lib/demo/fixtures/drush-sapi-i-progress.txt"
-  "lib/demo/fixtures/drush-config-get-views.json"
+  "lib/demo/fixtures/drush-config-get.json"
   "lib/demo/fixtures/drush-pm-list.json"
   "lib/demo/fixtures/composer-require.txt"
   "lib/demo/fixtures/clone-index-result.txt"
@@ -100,6 +112,24 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || err "Required command not found: $1"
 }
 
+download_file() {
+  local relpath="$1"
+  local dest="$2"
+  local raw_url="${RAW_BASE}/${relpath}"
+
+  if [[ -n "${AUTH_TOKEN}" ]]; then
+    # Private repos require authenticated fetches from the GitHub Contents API.
+    local api_url="${API_BASE}/${relpath}?ref=${REF}"
+    curl -fsSL \
+      -H "Authorization: Bearer ${AUTH_TOKEN}" \
+      -H "Accept: application/vnd.github.raw" \
+      "$api_url" -o "$dest"
+    return $?
+  fi
+
+  curl -fsSL "$raw_url" -o "$dest"
+}
+
 # ---------------------------------------------------------------------------
 # Main.
 # ---------------------------------------------------------------------------
@@ -124,19 +154,23 @@ DEST="${TARGET}/tools/searchstax-migration"
 ok "Repo root:    $TARGET"
 ok "Install path: $DEST"
 ok "Source ref:   ${REPO}@${REF}"
+if [[ -n "${AUTH_TOKEN}" ]]; then
+  ok "Download mode: authenticated GitHub API"
+else
+  ok "Download mode: raw.githubusercontent.com"
+fi
 
 mkdir -p "$DEST"/{lib/php-eval,lib/demo/bin,lib/demo/fixtures,templates,artifacts,logs,state}
 
 head "Downloading toolkit files"
 for relpath in "${FILES[@]}"; do
-  url="${RAW_BASE}/${relpath}"
   dest="${DEST}/${relpath}"
   mkdir -p "$(dirname "$dest")"
-  if curl -fsSL "$url" -o "$dest"; then
+  if download_file "$relpath" "$dest"; then
     dim "  + ${relpath}"
   else
-    err "Download failed: $url
-       (Check that ${REPO}@${REF} is reachable and the file exists.)"
+    err "Download failed: ${relpath}
+       (Check that ${REPO}@${REF} is reachable, the file exists, and your token has access.)"
   fi
 done
 

@@ -40,10 +40,25 @@ You do **not** need a local Drupal install. Every drush call goes through `acli 
 
 From the root of your Drupal repository (where `composer.json` lives):
 
+**Public repo:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/acquia/search-stax-migration/main/install.sh | bash
 cd tools/searchstax-migration
 ```
+
+**Private repo** — set `GITHUB_TOKEN` (or `GH_TOKEN`) first, then fetch `install.sh` via the GitHub Contents API. The installer will automatically use the same token for all subsequent file downloads:
+
+```bash
+export GITHUB_TOKEN="ghp_..."
+curl -fsSL \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github.raw" \
+  "https://api.github.com/repos/acquia/search-stax-migration/contents/install.sh?ref=main" | bash
+cd tools/searchstax-migration
+```
+
+> **Token scopes required:** `repo` (classic PAT) or `Contents: Read` (fine-grained PAT). If the repository is in a GitHub organisation with SAML SSO, also click **Configure SSO → Authorize** on your token settings page.
 
 ## 2. Try it safely
 

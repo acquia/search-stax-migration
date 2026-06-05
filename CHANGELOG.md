@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `install.sh` — file downloads now use the authenticated GitHub Contents API
+  when `GITHUB_TOKEN` or `GH_TOKEN` is set, enabling installation from
+  **private repositories** without manual steps. Public-repo installs are
+  unaffected (token not set → falls back to `raw.githubusercontent.com`).
+- `install.sh` — corrected two invalid fixture paths in the `FILES` list:
+  `drush-sapi-i-progress.txt` (never existed) and `drush-config-get-views.json`
+  (renamed to `drush-config-get.json`) were replaced with the actual filenames.
+
 ### Added
 - `provision` phase — creates SearchStax Site Search app(s) via the SearchStax REST API, then auto-populates `SEARCHSTAX_APP_ENDPOINT` for the `configure` phase. Auto-skipped in `--demo` mode or when an endpoint is already set. Session token cached in `state/searchstax.session` (chmod 600) to avoid burning a fresh 2FA TOTP on retries. Supersedes the standalone `create_apps.sh` proposal.
 - Initial v1 release of the migration toolkit.
