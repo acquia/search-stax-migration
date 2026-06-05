@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `install.sh` — `lib/searchstax_api.sh` was missing from the `FILES` list,
+  causing `./srsx-migrate` to fail with `No such file or directory` on line 729.
 - `install.sh` — file downloads now use the authenticated GitHub Contents API
   when `GITHUB_TOKEN` or `GH_TOKEN` is set, enabling installation from
   **private repositories** without manual steps. Public-repo installs are

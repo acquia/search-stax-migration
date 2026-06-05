@@ -43,6 +43,7 @@ DOCS_URL="https://docs.acquia.com/acquia-cloud-platform/migrating-acquia-search-
 # The set of files the installer downloads. Keep aligned with the repo layout.
 FILES=(
   "srsx-migrate"
+  "lib/searchstax_api.sh"
   "lib/php-eval/clone-index.php"
   "lib/php-eval/switch-view-index.php"
   "lib/php-eval/set-multisite-prefix.php"
