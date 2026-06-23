@@ -140,6 +140,7 @@ Most users never need this. But every phase is independently runnable:
 ```
 
 Add `--force` to re-run a phase that's already marked done.
+For a full phase reset, run `./srsx-migrate all --force` (clears saved phase progress, then starts from `preflight`).
 Run `./srsx-migrate status` at any time to see "you are at X; next: Y".
 
 ---

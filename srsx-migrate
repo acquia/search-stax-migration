@@ -97,7 +97,7 @@ DRY_RUN=0
 DEMO=0
 USE_COLOR=1
 ASSUME_YES=0
-FORCE=0                    # --force re-runs phases marked done.
+FORCE=0                    # --force re-runs done phases; with 'all' it resets progress first.
 PHASE_START_TIME=0         # Unix timestamp when current phase started (set by header()).
 declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
 LOG_FILE=""
@@ -624,6 +624,17 @@ phase_done_clear() {
   rm -f "${STATE_DIR}/done-$1"
 }
 
+# Clear resumability markers so the next run starts from preflight with a
+# clean phase state.
+clear_progress_state() {
+  mkdir -p "$STATE_DIR"
+  info "Clearing progress markers under ${STATE_DIR}/done-*"
+  rm -f "${STATE_DIR}"/done-*
+  rm -f "${STATE_DIR}/last-phase" \
+        "${STATE_DIR}/module-installed" \
+        "${STATE_DIR}/provisioned-app-id"
+}
+
 # Print "already complete" notice and return 0 (skip).
 phase_skip_done() {
   local phase="$1"
@@ -678,8 +689,7 @@ resume_or_select() {
       RUN_FROM="$next"
       ;;
     Restart*)
-      info "Clearing progress markers under ${STATE_DIR}/done-*"
-      rm -f "${STATE_DIR}"/done-*
+      clear_progress_state
       RUN_FROM="${PHASE_ORDER[0]}"
       ;;
     Pick*)
@@ -1595,7 +1605,8 @@ ${C_BOLD}GLOBAL FLAGS${C_RST}
   --dry-run                       Real env; print commands without executing.
   --no-color                      Disable ANSI colour output.
   --yes, -y                       Auto-confirm all prompts (use with care).
-  --force                         Re-run a phase even if marked done.
+  --force                         Re-run a phase even if marked done. With
+                                  'all', clear saved phase progress first.
   --env <name>                    (validate only) Target a non-default env.
 
 ${C_BOLD}WHAT THIS TOOLKIT DOES${C_RST}
@@ -1674,11 +1685,19 @@ dispatch() {
   case "${1:-interactive}" in
     interactive)
       ensure_init
-      resume_or_select
+      if [[ "$FORCE" == "1" ]]; then
+        clear_progress_state
+        RUN_FROM="${PHASE_ORDER[0]}"
+      else
+        resume_or_select
+      fi
       run_all
       ;;
     all)
       ensure_init
+      if [[ "$FORCE" == "1" ]]; then
+        clear_progress_state
+      fi
       RUN_FROM="${PHASE_ORDER[0]}"
       run_all
       ;;
