@@ -889,11 +889,11 @@ EOF
 _phase_preflight_inventory() {
   local servers="" indexes="" mods=""
   _drush_sapi_servers servers || {
-    warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}} (search_api may not be installed yet)"
+    warn "search-api:server-list failed${DRUSH_URI:+ for ${DRUSH_URI}} (search_api may not be installed yet)"
     servers="{}"
   }
   _drush_sapi_indexes indexes || {
-    warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}} (no indexes configured yet?)"
+    warn "search-api:status failed${DRUSH_URI:+ for ${DRUSH_URI}} (no indexes configured yet?)"
     indexes="{}"
   }
   drush_capture mods pm:list --type=module --status=enabled --format=json || {
@@ -921,6 +921,14 @@ _phase_preflight_inventory() {
     info "searchstax module not yet installed${DRUSH_URI:+ on ${DRUSH_URI}}."
     SRSX_NEEDS_INSTALL=1
   fi
+
+  # Reset the tracker, (re)index, and print status for this site so the
+  # baseline reflects a freshly-indexed state before migration. These are
+  # intentional mutating actions per the migration runbook.
+  info "Reset tracker + reindex${DRUSH_URI:+ on ${DRUSH_URI}}"
+  drush sapi-rt || warn "sapi-rt failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+  drush sapi-i  || warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+  drush sapi-s  || warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}}"
 }
 
 # =============================================================================
