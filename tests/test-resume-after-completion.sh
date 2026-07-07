@@ -22,7 +22,7 @@ export SRSX_DEMO_HOME=/tmp/srsx-demo-home-resumetest
 rm -rf "$SRSX_DEMO_HOME"
 
 # Run a full demo first so state/last-phase=cleanup is left behind.
-DEMO_ANSWERS="demoapp,dev,n,n,main,https://demo.searchstax.com,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
+DEMO_ANSWERS="demoapp,dev,n,main,https://demo.searchstax.com,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
     ./srsx-migrate --demo all </dev/null >/dev/null 2>&1
 
 [[ "$(cat "$SRSX_DEMO_HOME/state/last-phase" 2>/dev/null)" == "cleanup" ]] \
