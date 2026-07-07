@@ -527,6 +527,17 @@ ensure_init() {
     return 0
   fi
 
+  # Fresh run (no init.done) OR incomplete state. Clear all init-related
+  # variables so the wizard asks every question. This handles the case where
+  # migration.env has a stale ACQUIA_TARGET_ENV from a previous partial run
+  # but ACQUIA_APP is missing — without this, we'd skip the env question.
+  if [[ ! -f "${STATE_DIR}/init.done" ]]; then
+    ACQUIA_APP=""
+    ACQUIA_TARGET_ENV=""
+    SITES=""
+    SITES_ARR=()
+  fi
+
   printf '%s%s── First-run setup ──%s\n\n' "$C_HEAD" "$C_BOLD" "$C_RST"
   cat <<EOF
 This toolkit migrates your Drupal Search-API configuration from Acquia
