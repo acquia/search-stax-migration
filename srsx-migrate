@@ -848,11 +848,25 @@ EOF
 # Capture Search-API servers/indexes/modules for the current site (honors
 # DRUSH_URI set by for_each_site). Writes per-site inventory JSON files and
 # flags SRSX_NEEDS_INSTALL if the searchstax module isn't enabled here.
+#
+# All three drush calls are read-only/diagnostic. A non-zero exit (e.g.
+# search_api not yet installed on this site) must NOT abort the whole run;
+# we capture what we can, warn about failures, and continue so the operator
+# sees the full picture across all sites before deciding how to proceed.
 _phase_preflight_inventory() {
-  local servers indexes mods
-  drush_capture servers sapi-s --format=json
-  drush_capture indexes sapi-i --format=json
-  drush_capture mods    pm:list --type=module --status=enabled --format=json
+  local servers="" indexes="" mods=""
+  drush_capture servers sapi-s --format=json || {
+    warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}} (search_api may not be installed yet)"
+    servers="[]"
+  }
+  drush_capture indexes sapi-i --format=json || {
+    warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}} (no indexes configured yet?)"
+    indexes="[]"
+  }
+  drush_capture mods pm:list --type=module --status=enabled --format=json || {
+    warn "pm:list failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+    mods="{}"
+  }
 
   # Per-site filename slug (safe chars only), or 'default' for single-site.
   local slug="default"
