@@ -760,8 +760,16 @@ phase_preflight() {
   # call guard_against_prod() themselves.
 
   demo_sleep 0.4
+  # Version/bootstrap gate. Drupal/Drush versions are codebase-wide, so a
+  # single status check is enough — but under multisite a bare `drush status`
+  # may not bootstrap a DB (there's often no "default" site), so target the
+  # first configured --uri to get an accurate bootstrap/db-status.
   local status_json
+  if (( ${#SITES_ARR[@]} > 0 )); then
+    DRUSH_URI="${SITES_ARR[0]}"
+  fi
   drush_capture status_json status --format=json
+  DRUSH_URI=""
   if [[ -z "$status_json" ]]; then
     err "acli remote:drush returned nothing for ${ACQUIA_APP}.${EFFECTIVE_ENV}.
        Check:  acli auth:login
@@ -795,37 +803,29 @@ phase_preflight() {
 
   ok "Drupal/Drush versions OK."
 
-  # Inventory.
+  # Inventory. In multisite each site has its OWN Search-API servers, indexes
+  # and enabled modules, so the inventory must run once per --uri. The version
+  # gate above is codebase-wide, so it's fine to check it a single time.
   demo_sleep 0.4
-  local servers indexes mods
-  drush_capture servers sapi-s --format=json
-  drush_capture indexes sapi-i --format=json
-  drush_capture mods    pm:list --type=module --status=enabled --format=json
-
   mkdir -p "$ARTIFACTS_DIR"
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
-  local invdir="${ARTIFACTS_DIR}/inventory-${ts}"
-  mkdir -p "$invdir"
-  printf '%s\n' "$servers" > "${invdir}/servers.json"
-  printf '%s\n' "$indexes" > "${invdir}/indexes.json"
-  printf '%s\n' "$mods"    > "${invdir}/modules.json"
+  SRSX_INV_DIR="${ARTIFACTS_DIR}/inventory-${ts}"
+  mkdir -p "$SRSX_INV_DIR"
 
-  local n_srv n_idx
-  n_srv=$(printf '%s' "$servers" | jq 'length' 2>/dev/null || echo 0)
-  n_idx=$(printf '%s' "$indexes" | jq 'length' 2>/dev/null || echo 0)
-  ok "Inventory captured: ${n_srv} servers, ${n_idx} indexes → ${invdir}"
-
-  # Multisite info (driven by SITES env var; set during 'init' wizard).
   if (( ${#SITES_ARR[@]} > 1 )); then
-    info "Multisite mode: will iterate over ${#SITES_ARR[@]} sites: ${SITES_ARR[*]}"
+    info "Multisite mode: capturing inventory for ${#SITES_ARR[@]} sites: ${SITES_ARR[*]}"
   fi
 
-  # Module presence check.
-  if printf '%s' "$mods" | jq -e '.searchstax' >/dev/null 2>&1; then
-    ok "searchstax module already installed on ${EFFECTIVE_ENV} — install phase will be a no-op."
+  SRSX_NEEDS_INSTALL=0
+  for_each_site _phase_preflight_inventory
+
+  # module-installed is a codebase-wide optimisation hint: only claim it if
+  # every site already has the searchstax module enabled.
+  if [[ "${SRSX_NEEDS_INSTALL:-0}" == "0" ]]; then
+    ok "searchstax module already enabled on all site(s) — install phase will be a no-op."
     state_set "module-installed" "1"
   else
-    info "searchstax module not yet installed on ${EFFECTIVE_ENV} — install phase will add it."
+    info "searchstax module missing on at least one site — install phase will add it."
   fi
 
   cat <<EOF
@@ -843,6 +843,37 @@ EOF
   confirm "Have you completed doc step 8 (documented current search setup)?"
 
   phase_done_mark preflight
+}
+
+# Capture Search-API servers/indexes/modules for the current site (honors
+# DRUSH_URI set by for_each_site). Writes per-site inventory JSON files and
+# flags SRSX_NEEDS_INSTALL if the searchstax module isn't enabled here.
+_phase_preflight_inventory() {
+  local servers indexes mods
+  drush_capture servers sapi-s --format=json
+  drush_capture indexes sapi-i --format=json
+  drush_capture mods    pm:list --type=module --status=enabled --format=json
+
+  # Per-site filename slug (safe chars only), or 'default' for single-site.
+  local slug="default"
+  [[ -n "$DRUSH_URI" ]] && slug="$(printf '%s' "$DRUSH_URI" | tr -c 'A-Za-z0-9._-' '_')"
+
+  printf '%s\n' "$servers" > "${SRSX_INV_DIR}/servers-${slug}.json"
+  printf '%s\n' "$indexes" > "${SRSX_INV_DIR}/indexes-${slug}.json"
+  printf '%s\n' "$mods"    > "${SRSX_INV_DIR}/modules-${slug}.json"
+
+  local n_srv n_idx
+  n_srv=$(printf '%s' "$servers" | jq 'length' 2>/dev/null || echo 0)
+  n_idx=$(printf '%s' "$indexes" | jq 'length' 2>/dev/null || echo 0)
+  ok "Inventory${DRUSH_URI:+ for ${DRUSH_URI}}: ${n_srv} servers, ${n_idx} indexes → ${SRSX_INV_DIR}"
+
+  # Module presence check (per site).
+  if printf '%s' "$mods" | jq -e '.searchstax' >/dev/null 2>&1; then
+    ok "searchstax module already installed${DRUSH_URI:+ on ${DRUSH_URI}}."
+  else
+    info "searchstax module not yet installed${DRUSH_URI:+ on ${DRUSH_URI}}."
+    SRSX_NEEDS_INSTALL=1
+  fi
 }
 
 # =============================================================================
