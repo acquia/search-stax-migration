@@ -65,7 +65,7 @@ declare -A PHASE_DOC=(
 
 declare -A PHASE_DESC=(
   [preflight]="Run drush status, sapi-s, sapi-i, pm:list against the target Acquia env to verify versions and inventory the current Solr setup."
-  [backup]="(Optional) refresh dev DB from prod with 'acli pull:db', then trigger an on-demand Acquia DB backup and wait for it to finish."
+  [backup]="Prompt you to trigger an on-demand Acquia DB backup manually (via the Cloud UI) as a restore point before mutating the environment."
   [install]="composer require search_api/search_api_solr/searchstax/key locally, push the branch, wait for Acquia to deploy, then drush updb + cr + en the modules."
   [provision]="Create the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. Auto-skipped if SEARCHSTAX_APP_ENDPOINT is already set or in --demo mode."
   [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
@@ -1030,61 +1030,15 @@ phase_backup() {
   guard_against_prod
 
   cat <<EOF
-Before mutating ${ACQUIA_APP}.${EFFECTIVE_ENV}, you should:
-  1. Make sure ${EFFECTIVE_ENV} has a recent copy of the production DB so the
-     migration test reflects real data. The toolkit can run that for you:
-        acli pull:db ${ACQUIA_APP}.${EFFECTIVE_ENV}
-     (Source defaults to your prod env. Skip this if you already refreshed.)
-  2. Trigger an on-demand backup of the ${EFFECTIVE_ENV} DB and wait for it
-     to finish so you have a clean restore point.
+Before mutating ${ACQUIA_APP}.${EFFECTIVE_ENV}, take an on-demand backup so you
+have a clean restore point:
+  1. Open the Acquia Cloud UI for ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+  2. Trigger an on-demand backup of the ${EFFECTIVE_ENV} database and wait for
+     it to finish.
 
 EOF
 
-  local do_pull
-  ask "Refresh ${EFFECTIVE_ENV} DB from production now via 'acli pull:db'? (y/N)" do_pull "n"
-  if [[ "$do_pull" =~ ^[Yy] ]]; then
-    if ! run acli pull:db "${ACQUIA_APP}.${EFFECTIVE_ENV}" --no-interaction; then
-      warn "acli pull:db failed. Refresh the DB manually from the Cloud UI before continuing."
-      confirm "Continue anyway?"
-    else
-      ok "DB refreshed on ${EFFECTIVE_ENV}."
-    fi
-  else
-    info "Skipping DB refresh. Make sure ${EFFECTIVE_ENV} already has prod-like data."
-  fi
-
-  info "Triggering Acquia Cloud on-demand DB backup (${ACQUIA_APP}.${EFFECTIVE_ENV})"
-  if ! run acli api:environments:database-backup-create \
-         "${ACQUIA_APP}.${EFFECTIVE_ENV}" default; then
-    warn "acli backup call failed. You can also trigger one manually from
-       the Acquia Cloud UI before continuing. Acquia's nightly backups
-       remain in place either way."
-    confirm "Continue without an on-demand backup?"
-  fi
-
-  # Poll until the most recent backup reports state=completed (or we time out).
-  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
-    info "Waiting for the backup to finish (polling every 10s, up to 10 min)…"
-    local tries=0 max_tries=60 latest state=""
-    while (( tries < max_tries )); do
-      latest="$(acli api:environments:database-backups \
-                 "${ACQUIA_APP}.${EFFECTIVE_ENV}" default --limit=1 2>/dev/null \
-               || echo '[]')"
-      state="$(printf '%s' "$latest" \
-               | jq -r 'if type=="array" then .[0] else (._embedded.items[0] // .) end | (.completed_at // .completedAt // .completed // .state // "")' 2>/dev/null \
-               || echo "")"
-      if [[ -n "$state" && "$state" != "null" && "$state" != "in-progress" && "$state" != "queued" ]]; then
-        ok "Backup ready (state: ${state})."
-        break
-      fi
-      ((++tries))
-      sleep 10 2>/dev/null || true
-    done
-    if (( tries >= max_tries )); then
-      warn "Backup did not report completed within 10 minutes. Check the Cloud UI."
-      confirm "Continue anyway?"
-    fi
-  fi
+  confirm "Have you triggered an on-demand backup of the ${EFFECTIVE_ENV} DB and confirmed it finished?"
 
   cat <<EOF
 
