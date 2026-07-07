@@ -555,6 +555,11 @@ EOF
       SITES="$sites_csv"
       IFS=',' read -r -a SITES_ARR <<< "$SITES"
       _save_env_var SITES "$SITES"
+    else
+      # Single-site: drop any stale multisite config left in migration.env
+      # from a previous run so it doesn't silently re-apply.
+      SITES=""; SITES_ARR=()
+      _delete_env_var SITES
     fi
   fi
 
@@ -1236,6 +1241,18 @@ _save_env_var() {
   fi
 }
 
+# _delete_env_var <key> — remove a KEY="..." line from migration.env if present.
+# Used to clear stale answers (e.g. dropping SITES when the user switches a
+# previously-multisite setup back to single-site).
+_delete_env_var() {
+  local key="$1"
+  local envfile="$ENV_FILE"
+  [[ -f "$envfile" ]] || return 0
+  grep -q "^${key}=" "$envfile" || return 0
+  awk -v k="$key" 'BEGIN{FS="="} $1==k{next} {print}' \
+    "$envfile" > "${envfile}.tmp" && mv "${envfile}.tmp" "$envfile"
+}
+
 # =============================================================================
 # PHASE F — Server: create the SearchStax-backed search_api server config
 # =============================================================================
@@ -1587,7 +1604,8 @@ ${C_BOLD}${SCRIPT_NAME}${C_RST} v${SCRIPT_VERSION} — Acquia Search → SearchS
 
 ${C_BOLD}USAGE${C_RST}
   ./srsx-migrate                  Interactive guided run (resume or start).
-  ./srsx-migrate init             (Re-)run the first-run setup wizard.
+  ./srsx-migrate init             Reset & (re-)run first-run setup (re-asks
+                                  app, target env, and multisite/sites).
   ./srsx-migrate <phase>          Run a single phase.
   ./srsx-migrate all              Run all phases sequentially with prompts.
   ./srsx-migrate validate --env <name>
@@ -1702,9 +1720,11 @@ dispatch() {
       run_all
       ;;
     init)
-      # Force the wizard to re-run by clearing the marker.
+      # Full reset of the setup wizard: clear the marker AND every saved
+      # answer (app, env, multisite) so all questions are asked again.
       rm -f "${STATE_DIR}/init.done"
       ACQUIA_APP=""; ACQUIA_TARGET_ENV=""
+      SITES=""; SITES_ARR=()
       ensure_init
       ;;
     preflight|install|backup|provision|configure|server|index|views|route|handoff|cleanup)
