@@ -27,8 +27,12 @@ sub="${args[0]:-}"
 
 case "$sub" in
   status)         emit drush-status.json ;;
-  sapi-s|search-api:server-list)          emit drush-sapi-s.json ;;
-  sapi-i|search-api:index-list)
+  # Correct drush command mapping:
+  #   sapi-sl / search-api:server-list → list servers
+  #   sapi-s  / search-api:status      → list indexes with counts
+  #   sapi-rt / search-api:reset-tracker → reset tracker (action)
+  sapi-sl|search-api:server-list)         emit drush-sapi-s.json ;;
+  sapi-s|search-api:status)
     # If a state file says "after-clone", return the post-clone variant.
     if [[ -f "$FIX/.state-after-clone" ]]; then
       emit drush-sapi-i-after-clone.json
@@ -36,8 +40,10 @@ case "$sub" in
       emit drush-sapi-i.json
     fi
     ;;
-  sapi-c|search-api:index-clear)          echo "Cleared index ${args[1]:-?}." ;;
-  sapi-r|search-api:index-reset-tracker)  echo "Reset tracker for ${args[1]:-(all)}." ;;
+  sapi-rt|search-api:reset-tracker)       echo "Reset tracker for ${args[1]:-(all)}." ;;
+  sapi-c|search-api:clear)                echo "Cleared index ${args[1]:-?}." ;;
+  sapi-r|search-api:rebuild-tracker)      echo "Rebuilt tracker for ${args[1]:-(all)}." ;;
+  sapi-i|search-api:index)                echo "Indexed items for ${args[1]:-(all)}." ;;
   pm:list|pml)                            emit drush-pm-list.json ;;
   config:get|cget)                        emit drush-config-get.json ;;
   config:set|cset)                        echo "Set ${args[1]:-?} ${args[2]:-?} = ${args[3]:-?}." ;;
@@ -58,22 +64,7 @@ case "$sub" in
       *)                       echo "[php:script] Ran ${f} (demo)." ;;
     esac
     ;;
-  php:eval|php-eval)
-    # Detect the structured-data helpers from _drush_sapi_servers / _drush_sapi_indexes.
-    # The PHP code passed as args[1] contains a distinctive class name we can match on.
-    eval_code="${args[1]:-}"
-    if [[ "$eval_code" == *"Server::loadMultiple"* ]]; then
-      emit drush-sapi-s.json
-    elif [[ "$eval_code" == *"Index::loadMultiple"* ]]; then
-      if [[ -f "$FIX/.state-after-clone" ]]; then
-        emit drush-sapi-i-after-clone.json
-      else
-        emit drush-sapi-i.json
-      fi
-    else
-      echo "[php:eval] (demo)."
-    fi
-    ;;
+  php:eval|php-eval)                      echo "[php:eval] (demo)." ;;
   key-add)                                echo "Key added (demo)." ;;
   *)                                      echo "(demo drush) ${sub} ${args[*]:1}" ;;
 esac

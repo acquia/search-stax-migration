@@ -250,31 +250,25 @@ drush_capture() {
 }
 
 # ---------------------------------------------------------------------------
-# Search-API structured-data helpers.
+# Search-API drush command wrappers.
 #
-# Some versions of the search_api module do not register Drush's universal
-# --format option on their sapi-s / sapi-i commands (which are action
-# commands, not list commands in those versions). Using drush php:eval to
-# query the entities directly is version-independent and always reliable.
-#
-# Both helpers emit JSON matching the fixture schema used by the rest of
-# the script:
-#   servers → { "<id>": { id, name, status, backend, backend_config } }
-#   indexes → { "<id>": { id, name, server, status, count } }
+# Correct drush aliases for search_api:
+#   sapi-sl  = search-api:server-list  (list servers, supports --format=json)
+#   sapi-s   = search-api:status       (list indexes + counts, supports --format=json)
+#   sapi-rt  = search-api:reset-tracker (reset tracker for an index)
+#   sapi-i   = search-api:index        (ACTION: trigger indexing, NOT a list cmd)
+#   sapi-c   = search-api:clear        (clear an index)
+#   sapi-r   = search-api:rebuild-tracker (rebuild tracker)
 # ---------------------------------------------------------------------------
 
-# _drush_sapi_servers <varname>
-# shellcheck disable=SC2016
+# _drush_sapi_servers <varname> — capture server list as JSON
 _drush_sapi_servers() {
-  local _php='$r=[];foreach(\Drupal\search_api\Entity\Server::loadMultiple() as $id=>$s){$c=$s->getBackendConfig();$r[$id]=["id"=>$id,"name"=>$s->label(),"status"=>$s->status()?"Enabled":"Disabled","backend"=>$s->getBackendId(),"backend_config"=>$c];}echo json_encode($r);'
-  drush_capture "$1" php:eval "$_php"
+  drush_capture "$1" search-api:server-list --format=json
 }
 
-# _drush_sapi_indexes <varname>
-# shellcheck disable=SC2016
+# _drush_sapi_indexes <varname> — capture index status (with counts) as JSON
 _drush_sapi_indexes() {
-  local _php='$r=[];foreach(\Drupal\search_api\Entity\Index::loadMultiple() as $id=>$idx){try{$cnt=$idx->getTrackerInstance()->getIndexedItemsCount();}catch(\Exception $e){$cnt=0;}$r[$id]=["id"=>$id,"name"=>$idx->label(),"server"=>$idx->getServerId(),"status"=>$idx->status()?"Enabled":"Disabled","count"=>$cnt];}echo json_encode($r);'
-  drush_capture "$1" php:eval "$_php"
+  drush_capture "$1" search-api:status --format=json
 }
 
 # Run a shell command on the target Acquia env via `acli ssh`. Used by Phase
@@ -1436,12 +1430,12 @@ _phase_index_site() {
     while IFS= read -r idx; do
       [[ -z "$idx" ]] && continue
       info "Reindexing: ${idx}"
-      drush sapi-c "$idx"
-      drush sapi-r "$idx"
+      drush sapi-rt "$idx"
       drush sapi-i "$idx"
+      drush sapi-s "$idx"
     done <<< "$new_ids"
   else
-    audit "drush sapi-c <new>; drush sapi-r <new>; drush sapi-i <new>"
+    audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
   fi
 
   ok "Index cloning + reindex complete."
