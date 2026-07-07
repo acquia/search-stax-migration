@@ -985,10 +985,15 @@ EOF
   ok "Pushed to origin/${push_branch}."
 
   # Wait for Acquia to redeploy the env. The most reliable signal is that the
-  # env's deployed VCS path matches the branch we just pushed.
+  # env's deployed VCS path matches the branch we just pushed. On ACSF (Acquia
+  # Cloud Site Factory) pushing a branch does NOT auto-deploy it — the operator
+  # must deploy it via the Cloud UI — so we also let them press Enter to
+  # continue as soon as they've confirmed the deploy manually.
   if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
-    info "Waiting for Acquia to redeploy ${ACQUIA_APP}.${EFFECTIVE_ENV} with branch '${push_branch}' (polling every 15s, up to 10 min)…"
-    local tries=0 max_tries=40 envinfo deployed=""
+    info "Waiting for Acquia to redeploy ${ACQUIA_APP}.${EFFECTIVE_ENV} with branch '${push_branch}' (polling every 15s, up to 10 min)."
+    info "If this is an ACSF site, deploy '${push_branch}' to ${EFFECTIVE_ENV} in the Acquia Cloud UI now."
+    info "Press Enter at any time to continue once the deploy is done."
+    local tries=0 max_tries=40 envinfo deployed="" _key=""
     while (( tries < max_tries )); do
       envinfo="$(acli api:environments:find "${ACQUIA_APP}.${EFFECTIVE_ENV}" 2>/dev/null || echo '{}')"
       deployed="$(printf '%s' "$envinfo" | jq -r '.vcs.path // .vcs_path // ""' 2>/dev/null || echo "")"
@@ -996,8 +1001,15 @@ EOF
         ok "Acquia is now serving '${push_branch}' on ${EFFECTIVE_ENV}."
         break
       fi
+      # Wait up to 15s for the next poll, but let the operator press Enter to
+      # break out immediately after a manual (e.g. ACSF) deploy.
+      if [[ -t 0 ]] && read -r -t 15 _key; then
+        info "Continuing at operator request."
+        break
+      elif [[ ! -t 0 ]]; then
+        sleep 15 2>/dev/null || true
+      fi
       ((++tries))
-      sleep 15 2>/dev/null || true
     done
     if (( tries >= max_tries )); then
       warn "Could not auto-confirm the deploy. Check the Acquia Cloud UI before continuing."
