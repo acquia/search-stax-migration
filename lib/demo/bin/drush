@@ -58,6 +58,22 @@ case "$sub" in
       *)                       echo "[php:script] Ran ${f} (demo)." ;;
     esac
     ;;
+  php:eval|php-eval)
+    # Detect the structured-data helpers from _drush_sapi_servers / _drush_sapi_indexes.
+    # The PHP code passed as args[1] contains a distinctive class name we can match on.
+    eval_code="${args[1]:-}"
+    if [[ "$eval_code" == *"Server::loadMultiple"* ]]; then
+      emit drush-sapi-s.json
+    elif [[ "$eval_code" == *"Index::loadMultiple"* ]]; then
+      if [[ -f "$FIX/.state-after-clone" ]]; then
+        emit drush-sapi-i-after-clone.json
+      else
+        emit drush-sapi-i.json
+      fi
+    else
+      echo "[php:eval] (demo)."
+    fi
+    ;;
   key-add)                                echo "Key added (demo)." ;;
   *)                                      echo "(demo drush) ${sub} ${args[*]:1}" ;;
 esac

@@ -249,6 +249,34 @@ drush_capture() {
   run_capture "$var" "${cmd[@]}"
 }
 
+# ---------------------------------------------------------------------------
+# Search-API structured-data helpers.
+#
+# Some versions of the search_api module do not register Drush's universal
+# --format option on their sapi-s / sapi-i commands (which are action
+# commands, not list commands in those versions). Using drush php:eval to
+# query the entities directly is version-independent and always reliable.
+#
+# Both helpers emit JSON matching the fixture schema used by the rest of
+# the script:
+#   servers → { "<id>": { id, name, status, backend, backend_config } }
+#   indexes → { "<id>": { id, name, server, status, count } }
+# ---------------------------------------------------------------------------
+
+# _drush_sapi_servers <varname>
+# shellcheck disable=SC2016
+_drush_sapi_servers() {
+  local _php='$r=[];foreach(\Drupal\search_api\Entity\Server::loadMultiple() as $id=>$s){$c=$s->getBackendConfig();$r[$id]=["id"=>$id,"name"=>$s->label(),"status"=>$s->status()?"Enabled":"Disabled","backend"=>$s->getBackendId(),"backend_config"=>$c];}echo json_encode($r);'
+  drush_capture "$1" php:eval "$_php"
+}
+
+# _drush_sapi_indexes <varname>
+# shellcheck disable=SC2016
+_drush_sapi_indexes() {
+  local _php='$r=[];foreach(\Drupal\search_api\Entity\Index::loadMultiple() as $id=>$idx){try{$cnt=$idx->getTrackerInstance()->getIndexedItemsCount();}catch(\Exception $e){$cnt=0;}$r[$id]=["id"=>$id,"name"=>$idx->label(),"server"=>$idx->getServerId(),"status"=>$idx->status()?"Enabled":"Disabled","count"=>$cnt];}echo json_encode($r);'
+  drush_capture "$1" php:eval "$_php"
+}
+
 # Run a shell command on the target Acquia env via `acli ssh`. Used by Phase
 # 'handoff' to pull config files exported on the remote into the local repo.
 acli_ssh() {
@@ -855,13 +883,13 @@ EOF
 # sees the full picture across all sites before deciding how to proceed.
 _phase_preflight_inventory() {
   local servers="" indexes="" mods=""
-  drush_capture servers sapi-s --format=json || {
+  _drush_sapi_servers servers || {
     warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}} (search_api may not be installed yet)"
-    servers="[]"
+    servers="{}"
   }
-  drush_capture indexes sapi-i --format=json || {
+  _drush_sapi_indexes indexes || {
     warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}} (no indexes configured yet?)"
-    indexes="[]"
+    indexes="{}"
   }
   drush_capture mods pm:list --type=module --status=enabled --format=json || {
     warn "pm:list failed${DRUSH_URI:+ for ${DRUSH_URI}}"
@@ -1364,7 +1392,7 @@ phase_index() {
 
 _phase_index_site() {
   local idx_json
-  drush_capture idx_json sapi-i --format=json
+  _drush_sapi_indexes idx_json
 
   if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
     local legacy_ids
@@ -1388,7 +1416,7 @@ _phase_index_site() {
 
   # Reindex the new copies.
   local new_json
-  drush_capture new_json sapi-i --format=json
+  _drush_sapi_indexes new_json
   if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
     local new_ids
     new_ids=$(printf '%s' "$new_json" \
@@ -1493,8 +1521,8 @@ phase_validate() {
 SRSX_VALIDATE_FAIL=0
 _phase_validate_site() {
   local servers indexes views
-  drush_capture servers sapi-s --format=json
-  drush_capture indexes sapi-i --format=json
+  _drush_sapi_servers servers
+  _drush_sapi_indexes indexes
 
   # Server URL must contain searchstax.com.
   local hosts
