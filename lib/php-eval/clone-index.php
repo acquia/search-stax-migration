@@ -4,9 +4,11 @@
  * @file
  * Clone a legacy Search-API index onto the SearchStax server.
  *
- * Invoked via:
- *   SRSX_INDEX_ID=<legacy_id> SRSX_NEW_SERVER_ID=<server_id> \
- *     drush php:script lib/php-eval/clone-index.php
+ * Uploaded to the target env by srsx-migrate and invoked via:
+ *   drush php:script /tmp/srsx-<run>/clone-index.php -- <index_id> [server_id]
+ *
+ * Parameters arrive as php:script arguments (drush's $extra array), NOT as
+ * environment variables — client env does not survive the acli/SSH hop.
  *
  * Bypasses the CloneIndexesForm UI step from solr_to_searchstax_ss_migration
  * by calling the same UtilityService method that form invokes.
@@ -14,11 +16,12 @@
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
-$indexId  = getenv('SRSX_INDEX_ID') ?: '';
-$serverId = getenv('SRSX_NEW_SERVER_ID') ?: 'searchstax_server';
+$extra = $extra ?? [];
+$indexId  = $extra[0] ?? '';
+$serverId = $extra[1] ?? 'searchstax_server';
 
 if ($indexId === '') {
-  fwrite(STDERR, "[clone-index] SRSX_INDEX_ID is required.\n");
+  fwrite(STDERR, "[clone-index] Usage: drush php:script clone-index.php -- <index_id> [server_id]\n");
   exit(1);
 }
 

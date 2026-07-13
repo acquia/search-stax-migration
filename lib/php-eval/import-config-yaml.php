@@ -4,23 +4,27 @@
  * @file
  * Import a single rendered YAML file into Drupal active config.
  *
- * Invoked via:
- *   SRSX_YAML_FILE=<path> SRSX_CONFIG_NAME=<name> \
- *     drush php:script lib/php-eval/import-config-yaml.php
+ * Uploaded to the target env by srsx-migrate and invoked via:
+ *   drush php:script /tmp/srsx-<run>/import-config-yaml.php -- <yaml_file> <config_name>
+ *
+ * Parameters arrive as php:script arguments (drush's $extra array), NOT as
+ * environment variables — client env does not survive the acli/SSH hop. The
+ * YAML file is uploaded to the env alongside this script for the same reason.
  *
  * Used by Phase 'server' to install search_api.server.<id> from the templated
- * YAML written under artifacts/.
+ * YAML rendered under artifacts/.
  *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
 use Symfony\Component\Yaml\Yaml;
 
-$file = getenv('SRSX_YAML_FILE') ?: '';
-$name = getenv('SRSX_CONFIG_NAME') ?: '';
+$extra = $extra ?? [];
+$file = $extra[0] ?? '';
+$name = $extra[1] ?? '';
 
 if ($file === '' || $name === '') {
-  fwrite(STDERR, "[import-config-yaml] SRSX_YAML_FILE and SRSX_CONFIG_NAME are required.\n");
+  fwrite(STDERR, "[import-config-yaml] Usage: drush php:script import-config-yaml.php -- <yaml_file> <config_name>\n");
   exit(1);
 }
 if (!is_file($file)) {

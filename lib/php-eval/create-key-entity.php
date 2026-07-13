@@ -6,17 +6,29 @@
  *
  * Requires the contrib `key` module to be installed.
  *
- * Invoked via:
- *   SRSX_KEY_VALUE=<secret> drush php:script lib/php-eval/create-key-entity.php
+ * Uploaded to the target env by srsx-migrate and invoked via:
+ *   drush php:script /tmp/srsx-<run>/create-key-entity.php -- <value_file> [key_id]
+ *
+ * The secret is uploaded to <value_file> on the env and the PATH is passed as
+ * a php:script argument (drush's $extra array). The value itself never rides
+ * argv (visible in `ps` and audit logs) or env vars (which do not survive the
+ * acli/SSH hop). This script deletes <value_file> after reading it.
  *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
-$value = getenv('SRSX_KEY_VALUE') ?: '';
-$keyId = getenv('SRSX_KEY_ID') ?: 'searchstax_analytics_key';
+$extra = $extra ?? [];
+$valueFile = $extra[0] ?? '';
+$keyId = $extra[1] ?? 'searchstax_analytics_key';
 
-if ($value === '') {
-  fwrite(STDERR, "[create-key-entity] SRSX_KEY_VALUE is required.\n");
+if ($valueFile === '' || !is_file($valueFile)) {
+  fwrite(STDERR, "[create-key-entity] Usage: drush php:script create-key-entity.php -- <value_file> [key_id]\n");
+  exit(1);
+}
+$value = file_get_contents($valueFile);
+@unlink($valueFile);
+if ($value === FALSE || $value === '') {
+  fwrite(STDERR, "[create-key-entity] Could not read a non-empty key value from {$valueFile}.\n");
   exit(1);
 }
 if (!\Drupal::moduleHandler()->moduleExists('key')) {

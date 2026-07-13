@@ -111,6 +111,12 @@ ssx_last_read_token=""
 ssx_last_write_token=""
 ssx_last_analytics_url=""
 
+# Per-run scratch dir on the TARGET env. PHP helpers (and any files they
+# need) are uploaded here before execution, because laptop-local paths do not
+# exist on the remote host. Removed by srsx_remote_cleanup() when the run ends.
+SRSX_REMOTE_TMP="/tmp/srsx-$$"
+SRSX_REMOTE_USED=0
+
 # Acquia app + target env. Loaded from migration.env, captured by ensure_init() if blank.
 # EFFECTIVE_ENV is the env used for THIS invocation; defaults to ACQUIA_TARGET_ENV but
 # can be overridden by `--env <name>` on the validate subcommand only.
@@ -285,6 +291,62 @@ acli_ssh_capture() {
   [[ -n "${ACQUIA_APP:-}" ]] || err "ACQUIA_APP not set."
   [[ -n "${EFFECTIVE_ENV:-}" ]] || err "EFFECTIVE_ENV not set."
   run_capture "$var" acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Remote PHP helper execution.
+#
+# The drush() wrapper above executes on the TARGET Acquia env via
+# `acli remote:drush`, so two things never survive the SSH hop:
+#   • laptop-local file paths — the env has no ${SCRIPT_DIR}
+#   • client environment variables — sshd only accepts an AcceptEnv allowlist,
+#     which does not include our SRSX_* names
+# Helpers are therefore streamed to ${SRSX_REMOTE_TMP} on the env first, and
+# parameters travel as php:script ARGUMENTS (drush exposes them to the script
+# as $extra), never as env vars.
+# ---------------------------------------------------------------------------
+
+# srsx_remote_put <local_file> <remote_path> — stream a file onto the target env.
+srsx_remote_put() {
+  local src="$1" dst="$2"
+  [[ -f "$src" ]] || err "srsx_remote_put: local file missing: $src"
+  SRSX_REMOTE_USED=1
+  audit "acli ssh ${ACQUIA_APP}.${EFFECTIVE_ENV} -- 'mkdir -p $(dirname "$dst") && cat > $dst' < $src"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return 0
+  fi
+  acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- \
+    "mkdir -p '$(dirname "$dst")' && cat > '$dst'" < "$src" \
+    || err "Failed to copy ${src} to ${ACQUIA_APP}.${EFFECTIVE_ENV}:${dst}"
+}
+
+# drush_php_script <helper.php> [args...] — run lib/php-eval/<helper.php> on
+# the target env. Uploads the helper, then invokes it with the args appended
+# after `--` so the script reads them from drush's $extra array.
+drush_php_script() {
+  local script="$1"; shift
+  local local_path="${SCRIPT_DIR}/lib/php-eval/${script}"
+  [[ -f "$local_path" ]] || err "PHP helper missing: ${local_path}
+       (Re-run install.sh — older installs shipped an incomplete lib/php-eval/.)"
+
+  # Demo mode: the PATH-shimmed drush matches helpers by basename and never
+  # leaves the laptop, so no upload is needed (or possible).
+  if [[ "$DEMO" == "1" ]]; then
+    drush php:script "$local_path" -- "$@"
+    return
+  fi
+
+  srsx_remote_put "$local_path" "${SRSX_REMOTE_TMP}/${script}"
+  drush php:script "${SRSX_REMOTE_TMP}/${script}" -- "$@"
+}
+
+# Best-effort removal of the per-run scratch dir on the env. Called when the
+# run ends; a leftover dir is harmless (the platform periodically clears /tmp).
+srsx_remote_cleanup() {
+  [[ "$SRSX_REMOTE_USED" == "1" ]] || return 0
+  [[ "$DEMO" == "1" || "$DRY_RUN" == "1" ]] && return 0
+  acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "rm -rf '${SRSX_REMOTE_TMP}'" 2>/dev/null \
+    || warn "Could not remove ${SRSX_REMOTE_TMP} on the env (harmless)."
 }
 
 composer_in_repo() {
@@ -1314,9 +1376,14 @@ _phase_server_site() {
       "$tmpl" > "$out"
 
   info "Importing server config from ${out}"
-  # Use config:import via php:script because `drush cset` cannot create whole entities.
-  SRSX_YAML_FILE="$out" SRSX_CONFIG_NAME="search_api.server.${server_id}" \
-    drush php:script "${SCRIPT_DIR}/lib/php-eval/import-config-yaml.php"
+  # Upload the rendered YAML next to the helper — the remote drush process
+  # cannot read files from the operator's machine.
+  local remote_yaml="${SRSX_REMOTE_TMP}/server-${server_id}.yml"
+  if [[ "$DEMO" != "1" ]]; then
+    srsx_remote_put "$out" "$remote_yaml"
+  fi
+  # Use php:script because `drush cset` cannot create whole config entities.
+  drush_php_script import-config-yaml.php "$remote_yaml" "search_api.server.${server_id}"
 
   drush cr
   # Verify
@@ -1363,8 +1430,7 @@ _phase_index_site() {
     fi
     while IFS= read -r idx; do
       info "Cloning index: ${idx}"
-      SRSX_INDEX_ID="$idx" SRSX_NEW_SERVER_ID="${SRSX_NEW_SERVER_ID:-searchstax_server}" \
-        drush php:script "${SCRIPT_DIR}/lib/php-eval/clone-index.php"
+      drush_php_script clone-index.php "$idx" "${SRSX_NEW_SERVER_ID:-searchstax_server}"
     done <<< "$legacy_ids"
   else
     audit "drush php:script lib/php-eval/clone-index.php  # for each legacy index"
@@ -1407,7 +1473,7 @@ phase_views() {
 }
 
 _phase_views_site() {
-  drush php:script "${SCRIPT_DIR}/lib/php-eval/switch-view-index.php"
+  drush_php_script switch-view-index.php
   drush cr
   ok "Views switched to SearchStax-backed indexes."
 }
@@ -1437,8 +1503,18 @@ _phase_route_site() {
     case "${SECRET_STORAGE:-key}" in
       key)
         info "Storing analytics key as a Key module entity"
-        SRSX_KEY_VALUE="${SEARCHSTAX_ANALYTICS_KEY}" \
-          drush php:script "${SCRIPT_DIR}/lib/php-eval/create-key-entity.php"
+        # The secret travels as an uploaded file, not as a CLI argument —
+        # argv would land in the audit log and be visible to `ps` on the env.
+        # The helper deletes the file after reading it.
+        local keyfile="${ARTIFACTS_DIR}/.analytics-key.$$"
+        local remote_keyfile="${SRSX_REMOTE_TMP}/analytics.key"
+        mkdir -p "$ARTIFACTS_DIR"
+        ( umask 077 && printf '%s' "${SEARCHSTAX_ANALYTICS_KEY}" > "$keyfile" )
+        if [[ "$DEMO" != "1" ]]; then
+          srsx_remote_put "$keyfile" "$remote_keyfile"
+        fi
+        rm -f "$keyfile"
+        drush_php_script create-key-entity.php "$remote_keyfile" "searchstax_analytics_key"
         drush cset -y searchstax.settings key_id "searchstax_analytics_key"
         ;;
       plain)
@@ -1829,6 +1905,7 @@ main() {
   fi
 
   dispatch "${positional[@]:-interactive}"
+  srsx_remote_cleanup
 }
 
 main "$@"

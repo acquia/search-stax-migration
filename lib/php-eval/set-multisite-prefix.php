@@ -8,15 +8,19 @@
  * distinct prefix so documents are namespaced and "results from this site
  * only" filtering works.
  *
- * Invoked via:
- *   SRSX_PREFIX=<prefix> drush php:script lib/php-eval/set-multisite-prefix.php
+ * Uploaded to the target env by srsx-migrate and invoked via:
+ *   drush php:script /tmp/srsx-<run>/set-multisite-prefix.php -- <prefix>
+ *
+ * The prefix arrives as a php:script argument (drush's $extra array), NOT as
+ * an environment variable — client env does not survive the acli/SSH hop.
  *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
-$prefix = getenv('SRSX_PREFIX') ?: '';
+$extra = $extra ?? [];
+$prefix = $extra[0] ?? '';
 if ($prefix === '') {
-  fwrite(STDERR, "[set-multisite-prefix] SRSX_PREFIX is required.\n");
+  fwrite(STDERR, "[set-multisite-prefix] Usage: drush php:script set-multisite-prefix.php -- <prefix>\n");
   exit(1);
 }
 

@@ -47,6 +47,7 @@ test:
 	@bash tests/test-ssx-json-body.sh
 	@bash tests/test-provision-skip-when-endpoint-set.sh
 	@bash tests/test-provision-demo-skip.sh
+	@bash tests/test-remote-transport.sh
 
 demo:
 	@./srsx-migrate --demo
