@@ -50,6 +50,7 @@ test:
 	@bash tests/test-remote-transport.sh
 	@bash tests/test-safety-guards.sh
 	@bash tests/test-secret-redaction.sh
+	@bash tests/test-install-manifest.sh
 
 demo:
 	@./srsx-migrate --demo

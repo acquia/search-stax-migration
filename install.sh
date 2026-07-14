@@ -41,16 +41,23 @@ TARGET=""
 DOCS_URL="https://docs.acquia.com/acquia-cloud-platform/migrating-acquia-search-powered-searchstax"
 
 # The set of files the installer downloads. Keep aligned with the repo layout.
+# tests/test-install-manifest.sh fails CI if this list drifts from the
+# runtime files tracked in git.
 FILES=(
   "srsx-migrate"
+  ".gitignore"
   "lib/searchstax_api.sh"
   "lib/php-eval/clone-index.php"
   "lib/php-eval/switch-view-index.php"
   "lib/php-eval/set-multisite-prefix.php"
+  "lib/php-eval/import-config-yaml.php"
+  "lib/php-eval/create-key-entity.php"
   "lib/demo/bin/drush"
   "lib/demo/bin/composer"
   "lib/demo/bin/acli"
   "lib/demo/bin/git"
+  "lib/demo/bin/curl"
+  "lib/demo/bin/jq"
   "lib/demo/fixtures/drush-status.json"
   "lib/demo/fixtures/drush-sapi-s.json"
   "lib/demo/fixtures/drush-sapi-i.json"
