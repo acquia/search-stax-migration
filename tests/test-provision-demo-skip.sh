@@ -16,7 +16,7 @@ rm -rf "$SRSX_DEMO_HOME"
 
 # Same scripted-answers payload as the resume test / Makefile target —
 # provision must NOT consume an extra answer, so this list stays at 10.
-DEMO_ANSWERS="demoapp,dev,n,main,https://demo.searchstax.com,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
+DEMO_ANSWERS="demoapp,dev,n,main,https://searchcloud-2-us-east-1.searchstax.com/12345/demoapp-123/update,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
     ./srsx-migrate --demo all </dev/null >/tmp/srsx-demo-provision.log 2>&1 || {
         rc=$?
         echo "FAIL: ./srsx-migrate --demo all exited $rc"

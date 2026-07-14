@@ -3,20 +3,35 @@ status: true
 dependencies:
   module:
     - search_api_solr
+    - searchstax
 id: '@@ID@@'
 name: '@@NAME@@'
 description: 'SearchStax-backed Solr server. Created by srsx-migrate.'
 backend: search_api_solr
 backend_config:
-  connector: standard
+  # The `searchstax` connector (from drupal/searchstax) extends the standard
+  # search_api_solr connector with token-authenticated SearchStax endpoints.
+  # The plain `standard` connector cannot authenticate against SearchStax.
+  connector: searchstax
   connector_config:
     scheme: https
-    host: '@@ENDPOINT@@'
+    host: '@@HOST@@'
     port: 443
     path: /
-    core: ''
+    # SearchStax-specific: parsed from the update endpoint
+    # https://<host>/<context>/<core>/update by srsx-migrate, matching the
+    # regex the connector itself uses.
+    context: '@@CONTEXT@@'
+    core: '@@CORE@@'
+    update_endpoint: '@@UPDATE_ENDPOINT@@'
+    update_token: '@@UPDATE_TOKEN@@'
+    autosuggest_endpoint: ''
+    # Key-module storage of the connector credentials is a manual follow-up:
+    # create a JSON key ({"update_endpoint": ..., "update_token": ...}) and
+    # set key_id here, which clears the plain values above.
+    key_id: ''
     timeout: 5
-    index_timeout: 5
+    index_timeout: 15
     optimize_timeout: 10
     finalize_timeout: 30
     skip_schema_check: false

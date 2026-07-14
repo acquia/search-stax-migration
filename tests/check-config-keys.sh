@@ -43,6 +43,28 @@ for k in "${WRONG_KEYS[@]}"; do
   fi
 done
 
+# Server template must use the token-authenticated searchstax connector with
+# the keys its schema (searchstax.solr_connector.schema.yml) defines. The
+# plain `standard` connector cannot authenticate against SearchStax.
+TEMPLATE="${REPO_ROOT}/templates/search_api.server.searchstax.yml.tmpl"
+TEMPLATE_KEYS=(
+  "connector: searchstax"
+  "update_endpoint:"
+  "update_token:"
+  "context:"
+  "core:"
+)
+for k in "${TEMPLATE_KEYS[@]}"; do
+  if ! grep -q "${k}" "$TEMPLATE"; then
+    echo "FAIL: server template missing '${k}'"
+    fail=1
+  fi
+done
+if grep -q "connector: standard" "$TEMPLATE"; then
+  echo "FAIL: server template uses the 'standard' connector (no SearchStax auth)"
+  fail=1
+fi
+
 if (( fail )); then
   echo
   echo "One or more config keys are off. Verify against searchstax.schema.yml"

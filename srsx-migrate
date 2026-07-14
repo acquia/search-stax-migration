@@ -1362,18 +1362,68 @@ phase_server() {
   phase_done_mark server
 }
 
+# Parse a SearchStax endpoint into SRSX_EP_HOST / SRSX_EP_CONTEXT /
+# SRSX_EP_CORE / SRSX_EP_UPDATE. Accepts the update/select endpoint form
+# (https://<host>/<context>/<core>/update — what SearchStudio's "Search &
+# Indexing" page shows) or the bare app URL without the trailing verb. The
+# regex mirrors the one the searchstax connector itself validates with.
+SRSX_EP_HOST=""; SRSX_EP_CONTEXT=""; SRSX_EP_CORE=""; SRSX_EP_UPDATE=""
+_srsx_parse_endpoint() {
+  local url="${1%/}"
+  if [[ "$url" =~ ^https://([^/:]+)/([^/]+)/([^/]+)/(update|select)$ ]] \
+     || [[ "$url" =~ ^https://([^/:]+)/([^/]+)/([^/]+)$ ]]; then
+    SRSX_EP_HOST="${BASH_REMATCH[1]}"
+    SRSX_EP_CONTEXT="${BASH_REMATCH[2]}"
+    SRSX_EP_CORE="${BASH_REMATCH[3]}"
+    SRSX_EP_UPDATE="https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/update"
+    return 0
+  fi
+  return 1
+}
+
+# _render_template <tmpl> <out> [@@KEY@@ value]... — pure-bash substitution.
+# sed chokes on replacement metacharacters (&, |, \) that legitimately occur
+# in URLs and tokens; ${var//pat/repl} treats the replacement literally.
+# Values are single-quote-escaped for YAML ('' doubling).
+_render_template() {
+  local tmpl="$1" out="$2"; shift 2
+  local content; content="$(cat "$tmpl")"
+  local key val
+  while (( $# >= 2 )); do
+    key="$1"; val="${2//\'/\'\'}"
+    content="${content//"$key"/"$val"}"
+    shift 2
+  done
+  printf '%s\n' "$content" > "$out"
+}
+
 _phase_server_site() {
   local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
   local tmpl="${SCRIPT_DIR}/templates/search_api.server.searchstax.yml.tmpl"
   [[ -f "$tmpl" ]] || err "Server template missing: $tmpl"
 
+  _srsx_parse_endpoint "$SEARCHSTAX_APP_ENDPOINT" || \
+    err "SEARCHSTAX_APP_ENDPOINT does not look like a SearchStax endpoint: ${SEARCHSTAX_APP_ENDPOINT}
+       Expected https://<host>/<context>/<core>/update — copy it from
+       SearchStax Studio → Settings → Search & Indexing, then re-run
+       './srsx-migrate configure'."
+  if [[ -z "${SEARCHSTAX_WRITE_TOKEN:-}" ]]; then
+    warn "SEARCHSTAX_WRITE_TOKEN is empty — the server will be created without
+       an update token and indexing will fail until one is set. Re-run
+       './srsx-migrate configure' to provide it."
+    confirm "Continue anyway?"
+  fi
+
   local out="${ARTIFACTS_DIR}/server-${server_id}.yml"
   mkdir -p "$ARTIFACTS_DIR"
-  # Minimal template substitution.
-  sed -e "s|@@ID@@|${server_id}|g" \
-      -e "s|@@NAME@@|SearchStax Cloud|g" \
-      -e "s|@@ENDPOINT@@|${SEARCHSTAX_APP_ENDPOINT}|g" \
-      "$tmpl" > "$out"
+  _render_template "$tmpl" "$out" \
+    "@@ID@@" "$server_id" \
+    "@@NAME@@" "SearchStax Cloud" \
+    "@@HOST@@" "$SRSX_EP_HOST" \
+    "@@CONTEXT@@" "$SRSX_EP_CONTEXT" \
+    "@@CORE@@" "$SRSX_EP_CORE" \
+    "@@UPDATE_ENDPOINT@@" "$SRSX_EP_UPDATE" \
+    "@@UPDATE_TOKEN@@" "${SEARCHSTAX_WRITE_TOKEN:-}"
 
   info "Importing server config from ${out}"
   # Upload the rendered YAML next to the helper — the remote drush process
