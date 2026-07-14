@@ -2,11 +2,15 @@
 # Demo shim for `acli` (Acquia CLI).
 set -euo pipefail
 case "${1:-}" in
+  api:environments:database-list)
+    echo '[{"name":"demodb"}]'
+    ;;
   api:environments:database-backup-create)
     echo '{"message":"Backup queued (demo).","status":"queued"}'
     ;;
-  api:environments:database-backups)
-    # Mimic the most-recent-backup payload. Marked completed so the poller exits fast.
+  api:environments:database-backup-list)
+    # Real acli command name (the old api:environments:database-backups shim
+    # never matched anything). Marked completed so the poller exits fast.
     echo '[{"id":"demo-backup-0001","state":"completed","completed_at":"2026-04-24T12:00:00Z"}]'
     ;;
   api:environments:find)

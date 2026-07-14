@@ -74,10 +74,11 @@ The whole migration runs end-to-end against canned fixtures. Nothing in your rea
 ./srsx-migrate
 ```
 
-That's it. On first run the wizard asks two questions:
+That's it. On first run the wizard asks three questions:
 
 1. **Acquia application** (alias or UUID, e.g. `mycompany.myapp`)
 2. **Target environment** for this run (`dev` or `stage`)
+3. **Multisite?** (single-site is the default; multisite takes a comma-separated `--uri` list)
 
 Then it runs every phase in order, pausing at sensible points so you can read the output. If you stop and re-run, it asks whether to resume from where you left off.
 
@@ -108,7 +109,7 @@ After your CI/CD has deployed to prod:
 ./srsx-migrate validate --env prod
 ```
 
-This phase is the **one** phase that may target a production env. It only reads (`drush sapi-s`, `drush sapi-i`) — never writes.
+This phase is the **one** phase that may target a production env. It only reads (`drush search-api:server-list`, `drush search-api:status`) — never writes. (Careful readers: `sapi-i` is the *indexing action*, not a read — validate does not run it.)
 
 ## 5. If something goes wrong
 
@@ -127,17 +128,21 @@ Most users never need this. But every phase is independently runnable:
 
 ```bash
 ./srsx-migrate preflight     # read-only inventory
-./srsx-migrate install       # composer require + drush en
-./srsx-migrate backup        # DB dump + config snapshot
+./srsx-migrate backup        # on-demand Acquia DB backup (restore point)
+./srsx-migrate install       # composer require + push + drush en
+./srsx-migrate provision     # create SearchStax app(s) via REST API (optional)
 ./srsx-migrate configure     # SearchStax credentials prompt
 ./srsx-migrate server
-./srsx-migrate index
+./srsx-migrate index         # baseline reindex + clone legacy indexes
 ./srsx-migrate views
 ./srsx-migrate route
 ./srsx-migrate validate
 ./srsx-migrate handoff       # pull config to local + git add
 ./srsx-migrate cleanup       # uninstall legacy modules
 ```
+
+(This order matches the toolkit's `PHASE_ORDER`: backup runs **before**
+install so the restore point predates the first mutating change.)
 
 Add `--force` to re-run a phase that's already marked done.
 For a full phase reset, run `./srsx-migrate all --force` (clears saved phase progress, then starts from `preflight`).

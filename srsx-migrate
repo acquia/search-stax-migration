@@ -65,7 +65,7 @@ declare -A PHASE_DOC=(
 
 declare -A PHASE_DESC=(
   [preflight]="Read-only: run drush status, sapi-s, pm:list against the target Acquia env to verify versions and inventory the current Solr setup."
-  [backup]="Prompt you to trigger an on-demand Acquia DB backup manually (via the Cloud UI) as a restore point before mutating the environment."
+  [backup]="Trigger an on-demand Acquia DB backup via the Cloud API and wait for it to complete (manual Cloud-UI fallback), as a restore point before mutating the environment."
   [install]="composer require search_api/search_api_solr/searchstax/key locally, push the branch, wait for Acquia to deploy, then drush updb + cr + en the modules."
   [provision]="Create the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. Auto-skipped if SEARCHSTAX_APP_ENDPOINT is already set or in --demo mode."
   [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
@@ -806,9 +806,13 @@ resume_or_select() {
 
   if [[ -z "$next" ]]; then
     ok "All phases were completed on a previous run (last: ${last})."
-    info "  To replay everything from scratch:  rm -rf state/ logs/ artifacts/  &&  $0 ${DEMO:+--demo }all"
-    info "  To re-run one phase:                $0 ${DEMO:+--demo }<phase> --force"
-    info "  To pick a starting phase:           $0 ${DEMO:+--demo }<phase>"
+    # ${DEMO:+...} would expand for DEMO=0 too (non-empty string) — build the
+    # flag hint explicitly.
+    local demo_flag=""
+    [[ "$DEMO" == "1" ]] && demo_flag="--demo "
+    info "  To replay everything from scratch:  rm -rf state/ logs/ artifacts/  &&  $0 ${demo_flag}all"
+    info "  To re-run one phase:                $0 ${demo_flag}<phase> --force"
+    info "  To pick a starting phase:           $0 ${demo_flag}<phase>"
     info "  Valid phases: ${PHASE_ORDER[*]}"
     exit 0
   fi
@@ -1138,21 +1142,65 @@ _phase_install_site() {
 # PHASE D — Backup + config snapshot
 # =============================================================================
 
+# Trigger an on-demand DB backup via the Cloud API and poll until it
+# completes. Returns non-zero when the API path is unavailable (no databases
+# resolvable, create call rejected, poll timeout) so the caller can fall back
+# to the manual Cloud-UI prompt.
+_backup_via_api() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "acli api:environments:database-backup-create ${ACQUIA_APP}.${EFFECTIVE_ENV} <db>"
+    ok "(dry-run) On-demand backup simulated."
+    return 0
+  fi
+
+  local dbs_json db_name
+  dbs_json="$(acli api:environments:database-list "${ACQUIA_APP}.${EFFECTIVE_ENV}" 2>/dev/null)" || return 1
+  db_name="$(jq -r '.[0].name // empty' <<<"$dbs_json" 2>/dev/null)" || return 1
+  [[ -n "$db_name" ]] || return 1
+
+  info "Triggering an on-demand backup of database '${db_name}' on ${ACQUIA_APP}.${EFFECTIVE_ENV}…"
+  audit "acli api:environments:database-backup-create ${ACQUIA_APP}.${EFFECTIVE_ENV} ${db_name}"
+  acli api:environments:database-backup-create \
+    "${ACQUIA_APP}.${EFFECTIVE_ENV}" "$db_name" >/dev/null 2>&1 || return 1
+
+  # Poll the newest backup until it reports a completion timestamp. Note:
+  # ANY backup completed from here on is a valid restore point — it predates
+  # every mutating phase — so "newest backup shows completed_at" is the
+  # condition, not "the specific backup we queued finished".
+  local waited=0 completed=""
+  while (( waited < 900 )); do
+    completed="$(acli api:environments:database-backup-list \
+        "${ACQUIA_APP}.${EFFECTIVE_ENV}" "$db_name" 2>/dev/null \
+      | jq -r 'if type == "array" and length > 0 then (.[0].completed_at // empty) else empty end' \
+        2>/dev/null)" || completed=""
+    if [[ -n "$completed" && "$completed" != "null" ]]; then
+      ok "Restore point confirmed: newest '${db_name}' backup completed at ${completed}."
+      return 0
+    fi
+    info "  …backup still running (${waited}s). Checking again in 15s."
+    sleep 15
+    waited=$((waited + 15))
+  done
+
+  warn "Backup did not report completion within 15 minutes."
+  return 1
+}
+
 phase_backup() {
   header "backup" "${PHASE_DESC[backup]}"
   if phase_done_check backup; then phase_skip_done backup; return 0; fi
   guard_against_prod
 
-  cat <<EOF
-Before mutating ${ACQUIA_APP}.${EFFECTIVE_ENV}, take an on-demand backup so you
-have a clean restore point:
+  if ! _backup_via_api; then
+    cat <<EOF
+Could not trigger the backup through the Cloud API. Take one manually:
   1. Open the Acquia Cloud UI for ${ACQUIA_APP}.${EFFECTIVE_ENV}.
   2. Trigger an on-demand backup of the ${EFFECTIVE_ENV} database and wait for
      it to finish.
 
 EOF
-
-  confirm "Have you triggered an on-demand backup of the ${EFFECTIVE_ENV} DB and confirmed it finished?"
+    confirm "Have you triggered an on-demand backup of the ${EFFECTIVE_ENV} DB and confirmed it finished?"
+  fi
 
   cat <<EOF
 
