@@ -48,6 +48,7 @@ test:
 	@bash tests/test-provision-skip-when-endpoint-set.sh
 	@bash tests/test-provision-demo-skip.sh
 	@bash tests/test-remote-transport.sh
+	@bash tests/test-safety-guards.sh
 
 demo:
 	@./srsx-migrate --demo

@@ -64,13 +64,13 @@ declare -A PHASE_DOC=(
 )
 
 declare -A PHASE_DESC=(
-  [preflight]="Run drush status, sapi-s, sapi-i, pm:list against the target Acquia env to verify versions and inventory the current Solr setup."
+  [preflight]="Read-only: run drush status, sapi-s, pm:list against the target Acquia env to verify versions and inventory the current Solr setup."
   [backup]="Prompt you to trigger an on-demand Acquia DB backup manually (via the Cloud UI) as a restore point before mutating the environment."
   [install]="composer require search_api/search_api_solr/searchstax/key locally, push the branch, wait for Acquia to deploy, then drush updb + cr + en the modules."
   [provision]="Create the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. Auto-skipped if SEARCHSTAX_APP_ENDPOINT is already set or in --demo mode."
   [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
   [server]="Create the SearchStax-backed search_api server config."
-  [index]="Clone each legacy index into a SearchStax-backed copy and reindex."
+  [index]="Baseline-reindex the legacy indexes (behind a confirm), then clone each into a SearchStax-backed copy and reindex."
   [views]="Switch every Search-API view to its new SearchStax-backed index."
   [route]="Enable 'Re-route searches through SearchStudio' + write analytics URL/key."
   [validate]="Assert server URL, item counts, and view bindings on the target env."
@@ -522,7 +522,30 @@ is_prod_env() {
   for p in "${PROD_ENV_NAMES[@]}"; do
     [[ "$name" == "$p" ]] && return 0
   done
+  # ACSF production envs are named NNlive (01live, 02live, ...).
+  [[ "$name" =~ ^[0-9]+live$ ]] && return 0
   return 1
+}
+
+# Authoritative prod check: ask the Cloud API for the env's production flag.
+# Name matching alone misses custom env names; the platform knows. Result is
+# cached per run. Unknown (API unreachable, demo, dry-run) counts as NOT
+# prod — the name-based check above still applies on top.
+SRSX_ENV_PROD_FLAG=""
+env_is_prod_by_api() {
+  [[ "$DEMO" == "1" || "$DRY_RUN" == "1" ]] && return 1
+  if [[ -z "$SRSX_ENV_PROD_FLAG" ]]; then
+    local out flag=""
+    if out="$(acli api:environments:find "${ACQUIA_APP}.${EFFECTIVE_ENV}" 2>/dev/null)"; then
+      flag="$(jq -r 'if .flags.production == true then "1" else "0" end' <<<"$out" 2>/dev/null)" || flag=""
+    fi
+    if [[ -z "$flag" ]]; then
+      warn "Could not confirm via the Cloud API whether '${EFFECTIVE_ENV}' is production; relying on its name only."
+      flag="0"
+    fi
+    SRSX_ENV_PROD_FLAG="$flag"
+  fi
+  [[ "$SRSX_ENV_PROD_FLAG" == "1" ]]
 }
 
 # Parse comma-separated DEMO_ANSWERS env var into array (consumed by ask*).
@@ -556,8 +579,11 @@ enable_demo_mode() {
   REPO_ROOT="$demo_home"
 
   # Rebase all runtime paths under the throwaway home so the wizard's saved
-  # migration.env, state markers, logs, and artifacts all live there.
+  # migration.env, state markers, logs, and artifacts all live there. The
+  # demo drush shim keeps its cross-phase state here too (exported below) so
+  # the fixtures dir stays pristine across runs.
   SRSX_HOME="$demo_home"
+  export SRSX_DEMO_STATE_DIR="${SRSX_HOME}/state"
   ARTIFACTS_DIR="${SRSX_HOME}/artifacts"
   LOG_DIR="${SRSX_HOME}/logs"
   STATE_DIR="${SRSX_HOME}/state"
@@ -675,7 +701,7 @@ guard_against_prod() {
   if [[ "$ALLOW_PROD_ENV" == "1" ]]; then
     return 0
   fi
-  if is_prod_env "${EFFECTIVE_ENV:-}"; then
+  if is_prod_env "${EFFECTIVE_ENV:-}" || env_is_prod_by_api; then
     err "Mutating phases run on dev/stage so you can validate the migration before
        it goes live. Re-run with ACQUIA_TARGET_ENV=dev (or stage), then deploy
        the staged changes to '${EFFECTIVE_ENV}' through your normal Acquia
@@ -865,38 +891,42 @@ phase_preflight() {
   fi
   drush_capture status_json status --format=json
   DRUSH_URI=""
-  if [[ -z "$status_json" ]]; then
-    err "acli remote:drush returned nothing for ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+  if [[ "$DRY_RUN" == "1" ]]; then
+    info "(dry-run) Skipping status/version validation — no command output to check."
+  else
+    if [[ -z "$status_json" ]]; then
+      err "acli remote:drush returned nothing for ${ACQUIA_APP}.${EFFECTIVE_ENV}.
        Check:  acli auth:login
                acli api:applications:find
                acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- status"
-  fi
+    fi
 
-  local drupal_ver drush_ver bootstrap db
-  drupal_ver=$(printf '%s' "$status_json" | jq -r '.["drupal-version"] // ""')
-  drush_ver=$(printf '%s' "$status_json"  | jq -r '.["drush-version"] // ""')
-  bootstrap=$(printf '%s' "$status_json"  | jq -r '.["bootstrap"] // ""')
-  db=$(printf '%s' "$status_json"         | jq -r '.["db-status"] // ""')
+    local drupal_ver drush_ver bootstrap db
+    drupal_ver=$(printf '%s' "$status_json" | jq -r '.["drupal-version"] // ""')
+    drush_ver=$(printf '%s' "$status_json"  | jq -r '.["drush-version"] // ""')
+    bootstrap=$(printf '%s' "$status_json"  | jq -r '.["bootstrap"] // ""')
+    db=$(printf '%s' "$status_json"         | jq -r '.["db-status"] // ""')
 
-  info "Drupal:    ${drupal_ver:-?}"
-  info "Drush:     ${drush_ver:-?}"
-  info "Bootstrap: ${bootstrap:-?}"
-  info "DB:        ${db:-?}"
+    info "Drupal:    ${drupal_ver:-?}"
+    info "Drush:     ${drush_ver:-?}"
+    info "Bootstrap: ${bootstrap:-?}"
+    info "DB:        ${db:-?}"
 
-  if [[ "$drupal_ver" =~ ^7\. ]]; then
-    err "Drupal 7 is not supported by this toolkit.
+    if [[ "$drupal_ver" =~ ^7\. ]]; then
+      err "Drupal 7 is not supported by this toolkit.
        Follow the SearchStax direct setup guide instead:
        https://support.searchstax.com/hc/en-us/categories/11675838621325-Site-Search"
-  fi
-  if [[ -n "$drush_ver" ]] && [[ "${drush_ver%%.*}" -lt 11 ]]; then
-    err "Drush ${drush_ver} is too old. Drush 11+ required. Upgrade with:
+    fi
+    if [[ -n "$drush_ver" ]] && [[ "${drush_ver%%.*}" -lt 11 ]]; then
+      err "Drush ${drush_ver} is too old. Drush 11+ required. Upgrade with:
        composer require --dev drush/drush:^12 -W"
-  fi
-  if [[ "$bootstrap" != "" && "$bootstrap" != "Successful" ]]; then
-    warn "Bootstrap status: ${bootstrap}. Some phases may fail."
-  fi
+    fi
+    if [[ "$bootstrap" != "" && "$bootstrap" != "Successful" ]]; then
+      warn "Bootstrap status: ${bootstrap}. Some phases may fail."
+    fi
 
-  ok "Drupal/Drush versions OK."
+    ok "Drupal/Drush versions OK."
+  fi
 
   # Inventory. In multisite each site has its OWN Search-API servers, indexes
   # and enabled modules, so the inventory must run once per --uri. The version
@@ -984,13 +1014,11 @@ _phase_preflight_inventory() {
     SRSX_NEEDS_INSTALL=1
   fi
 
-  # Reset the tracker, (re)index, and print status for this site so the
-  # baseline reflects a freshly-indexed state before migration. These are
-  # intentional mutating actions per the migration runbook.
-  info "Reset tracker + reindex${DRUSH_URI:+ on ${DRUSH_URI}}"
-  drush sapi-rt || warn "sapi-rt failed${DRUSH_URI:+ for ${DRUSH_URI}}"
-  drush sapi-i  || warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}}"
-  drush sapi-s  || warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+  # NOTE: preflight is strictly read-only. The baseline reset-tracker +
+  # reindex the runbook asks for happens at the start of phase 'index' —
+  # after the 'backup' phase has secured a restore point, behind a confirm,
+  # and behind guard_against_prod (which preflight deliberately skips).
+  drush sapi-s || warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}}"
 }
 
 # =============================================================================
@@ -1469,43 +1497,58 @@ _phase_index_site() {
   local idx_json
   _drush_sapi_indexes idx_json
 
-  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
-    local legacy_ids
-    legacy_ids=$(printf '%s' "$idx_json" \
-      | jq -r 'to_entries[] | select(.value.server | startswith("searchstax") | not) | .key' \
-      || true)
-    if [[ -z "$legacy_ids" ]]; then
-      warn "No legacy (non-SearchStax) indexes found. Nothing to clone."
-      return 0
-    fi
-    while IFS= read -r idx; do
-      info "Cloning index: ${idx}"
-      drush_php_script clone-index.php "$idx" "${SRSX_NEW_SERVER_ID:-searchstax_server}"
-    done <<< "$legacy_ids"
-  else
-    audit "drush php:script lib/php-eval/clone-index.php  # for each legacy index"
+  # Dry-run has no JSON to parse; just show what would happen. Demo mode runs
+  # the full flow below against the fixture shims, exactly like a real run.
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "drush sapi-rt && drush sapi-i  # baseline reindex of legacy indexes"
+    audit "drush php:script clone-index.php -- <legacy_id> <server_id>  # for each legacy index"
+    audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
+    ok "Index cloning + reindex simulated."
+    return 0
   fi
+
+  local legacy_ids
+  # (.value.server // "") keeps jq from erroring on indexes with no server;
+  # a real parse failure must abort loudly, not read as "nothing to clone".
+  legacy_ids=$(printf '%s' "$idx_json" \
+    | jq -r 'to_entries[] | select((.value.server // "") | startswith("searchstax") | not) | .key') \
+    || err "Could not parse search-api:status output as JSON. Raw (truncated):
+       ${idx_json:0:300}"
+  if [[ -z "$legacy_ids" ]]; then
+    warn "No legacy (non-SearchStax) indexes found. Nothing to clone."
+    return 0
+  fi
+
+  # Baseline reindex of the legacy indexes (runbook step). Mutating, so it
+  # lives here — after 'backup', behind guard_against_prod — not in the
+  # read-only preflight. It temporarily empties search results while items
+  # reindex, hence the confirm.
+  confirm "Reset trackers + reindex the legacy indexes now for an accurate baseline? (Search results shrink until reindexing completes.)"
+  drush sapi-rt || warn "sapi-rt failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+  drush sapi-i  || warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+  drush sapi-s  || warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+
+  while IFS= read -r idx; do
+    info "Cloning index: ${idx}"
+    drush_php_script clone-index.php "$idx" "${SRSX_NEW_SERVER_ID:-searchstax_server}"
+  done <<< "$legacy_ids"
 
   drush cr
 
   # Reindex the new copies.
-  local new_json
+  local new_json new_ids
   _drush_sapi_indexes new_json
-  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
-    local new_ids
-    new_ids=$(printf '%s' "$new_json" \
-      | jq -r 'to_entries[] | select(.value.server | startswith("searchstax")) | .key' \
-      || true)
-    while IFS= read -r idx; do
-      [[ -z "$idx" ]] && continue
-      info "Reindexing: ${idx}"
-      drush sapi-rt "$idx"
-      drush sapi-i "$idx"
-      drush sapi-s "$idx"
-    done <<< "$new_ids"
-  else
-    audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
-  fi
+  new_ids=$(printf '%s' "$new_json" \
+    | jq -r 'to_entries[] | select((.value.server // "") | startswith("searchstax")) | .key') \
+    || err "Could not parse search-api:status output after cloning. Raw (truncated):
+       ${new_json:0:300}"
+  while IFS= read -r idx; do
+    [[ -z "$idx" ]] && continue
+    info "Reindexing: ${idx}"
+    drush sapi-rt "$idx"
+    drush sapi-i "$idx"
+    drush sapi-s "$idx"
+  done <<< "$new_ids"
 
   ok "Index cloning + reindex complete."
 }
@@ -1604,27 +1647,41 @@ phase_validate() {
 
 SRSX_VALIDATE_FAIL=0
 _phase_validate_site() {
+  # Dry-run captures nothing, so there is nothing real to assert against.
+  if [[ "$DRY_RUN" == "1" ]]; then
+    ok "(dry-run) Validation checks simulated."
+    return 0
+  fi
+
   local servers indexes views
   _drush_sapi_servers servers
   _drush_sapi_indexes indexes
 
-  # Server URL must contain searchstax.com.
+  # At least one server whose host is on searchstax.com must exist. An empty
+  # server list is a FAILURE — "nothing found" must never validate as OK.
   local hosts
   hosts=$(printf '%s' "$servers" \
-    | jq -r '.[].backend_config.connector_config.host // .[].backend_config.host // empty' \
+    | jq -r '.[]?.backend_config?.connector_config?.host // .[]?.backend_config?.host // empty' \
     2>/dev/null || true)
-  if [[ -n "$hosts" ]] && ! grep -q "searchstax.com" <<<"$hosts"; then
+  if [[ -z "$hosts" ]]; then
+    warn "No Search-API servers found${DRUSH_URI:+ for ${DRUSH_URI}} — cannot validate."
+    SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
+  elif ! grep -q "searchstax.com" <<<"$hosts"; then
     warn "No server host contains 'searchstax.com' (${hosts})"
     SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
   else
     ok "Server hosts contain searchstax.com"
   fi
 
-  # Each searchstax-backed index must have count > 0.
+  # Each searchstax-backed index must exist and have count > 0.
   local rows
   rows=$(printf '%s' "$indexes" \
-    | jq -r 'to_entries[] | select(.value.server | startswith("searchstax")) | "\(.key) \(.value.count // 0)"' \
+    | jq -r 'to_entries[] | select((.value.server // "") | startswith("searchstax")) | "\(.key) \(.value.count // 0)"' \
     2>/dev/null || true)
+  if [[ -z "$rows" ]]; then
+    warn "No SearchStax-backed indexes found${DRUSH_URI:+ for ${DRUSH_URI}} — was the 'index' phase run?"
+    SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
+  fi
   while IFS=' ' read -r idx cnt; do
     [[ -z "$idx" ]] && continue
     if [[ "$cnt" =~ ^[0-9]+$ ]] && (( cnt > 0 )); then

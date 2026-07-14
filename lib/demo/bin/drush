@@ -34,7 +34,9 @@ case "$sub" in
   sapi-sl|search-api:server-list)         emit drush-sapi-s.json ;;
   sapi-s|search-api:status)
     # If a state file says "after-clone", return the post-clone variant.
-    if [[ -f "$FIX/.state-after-clone" ]]; then
+    # State lives under the throwaway demo home (SRSX_DEMO_STATE_DIR), never
+    # in the fixtures dir — polluting fixtures would leak state across runs.
+    if [[ -f "${SRSX_DEMO_STATE_DIR:-$FIX}/.state-after-clone" ]]; then
       emit drush-sapi-i-after-clone.json
     else
       emit drush-sapi-i.json
@@ -56,7 +58,11 @@ case "$sub" in
   php:script)
     f="${args[1]:-}"
     case "$f" in
-      *clone-index.php)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
+      *clone-index.php)
+        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned."
+        mkdir -p "${SRSX_DEMO_STATE_DIR:-$FIX}"
+        touch "${SRSX_DEMO_STATE_DIR:-$FIX}/.state-after-clone"
+        ;;
       *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
       *import-config-yaml.php) echo "[import-config-yaml] Imported (demo)." ;;

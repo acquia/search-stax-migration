@@ -3,12 +3,34 @@
     "id": "acquia_search_server",
     "name": "Acquia Search",
     "status": "Enabled",
-    "backend": "search_api_solr"
+    "backend": "search_api_solr",
+    "backend_config": {
+      "connector": "solr_acquia_connector",
+      "connector_config": {
+        "scheme": "https",
+        "host": "useast1-c32.acquia-search.com",
+        "port": 443,
+        "path": "/",
+        "core": "ABCD-12345.dev.demoapp"
+      }
+    }
   },
   "searchstax_server": {
     "id": "searchstax_server",
     "name": "SearchStax Cloud",
     "status": "Enabled",
-    "backend": "search_api_solr"
+    "backend": "search_api_solr",
+    "backend_config": {
+      "connector": "searchstax",
+      "connector_config": {
+        "scheme": "https",
+        "host": "searchcloud-2-us-east-1.searchstax.com",
+        "port": 443,
+        "path": "/",
+        "context": "12345",
+        "core": "demoapp-123",
+        "update_endpoint": "https://searchcloud-2-us-east-1.searchstax.com/12345/demoapp-123/update"
+      }
+    }
   }
 }
