@@ -7,24 +7,27 @@
 It can:
 
 - Modify `composer.json` and `composer.lock` (Phase `install`, Phase `cleanup`).
+- Commit and push the install-phase changes to your git remote — only after an explicit confirmation prompt (Phase `install`). On repos that track dependency code in git it also stages `vendor/` and `modules/contrib/`, since classic Acquia deploys do not run `composer install`.
 - Enable, configure, and uninstall Drupal modules on the target Acquia env (Phases `install`, `route`, `cleanup`).
 - Create, modify, and delete Drupal configuration entities on the target env (Phases `server`, `index`, `views`, `route`, `cleanup`).
-- Trigger an Acquia Cloud on-demand database backup via `acli` (Phase `backup`).
-- Stage files in git (Phase `handoff`). It does **not** commit or push.
+- Trigger an Acquia Cloud on-demand database backup and poll it to completion, via `acli api:environments:database-list`, `database-backup-create`, and `database-backup-list` (Phase `backup`).
+- Query the environment's production flag via `acli api:environments:find` (prod guard for every mutating phase).
+- Upload the PHP helpers in `lib/php-eval/` (and the rendered server YAML / analytics-key file) to a per-run `/tmp/srsx-<pid>` directory on the target env over `acli ssh`, and remove that directory when the run ends (Phases `server`, `index`, `views`, `route`).
+- Stage files in git (Phase `handoff`, Phase `cleanup`). Those phases do **not** commit or push.
 
 It cannot:
 
 - Edit or delete arbitrary files in your repository.
-- Reach out to the network for anything except (a) the SearchStax endpoint you supplied, via Drupal's normal Search-API traffic and (b) `acli`'s normal Acquia Cloud API traffic.
-- Run anything outside of `drush`, `composer`, `acli`, `git`, `sed`, `awk`, `jq`, `tar/gzip`, `mkdir`, and the PHP helpers in `lib/php-eval/`.
+- Reach out to the network for anything except (a) the SearchStax endpoint you supplied, via Drupal's normal Search-API traffic, (b) `acli`'s normal Acquia Cloud API traffic, and (c) the SearchStax REST API via `curl` in the optional `provision` phase.
+- Run anything outside of `drush`, `composer`, `acli`, `git`, `curl`, `sed`, `awk`, `jq`, `tar/gzip`, `mkdir`, and the PHP helpers in `lib/php-eval/`.
 
 ## Audit log
 
-Every external command is printed (`+ command…`) to stdout *before* execution, and to a per-run log file at `logs/<timestamp>-srsx.log`. The log captures both stdout and stderr via `tee`, so you have a verbatim record of what ran, in what order, and what it returned.
+Every external command is printed (`+ command…`) to stdout *before* execution, and to a per-run log file at `logs/<timestamp>-srsx.log`. The log captures both stdout and stderr via `tee`, so you have a record of what ran, in what order, and what it returned — with one deliberate exception: known secret values (SearchStax tokens, analytics key, passwords, session token) are replaced with `[redacted]` in the audit lines before they reach the screen or the log.
 
 ## Secret handling
 
-The SearchStax read token, write token, and analytics key are prompted via `read -s` (echo disabled) and held in process memory only. They are **never** written to `migration.env`. `migration.env` is also in `.gitignore`.
+The SearchStax read token, write token, and analytics key are prompted via `read -s` (echo disabled) and held in process memory only. They are **never** written to `migration.env`. `migration.env` is also in `.gitignore` and created with mode 600. When the analytics key must reach the target env, it travels as an uploaded file (mode 077 umask) that the PHP helper deletes immediately after reading — never as a command-line argument, which would be visible to `ps` and the audit log. SearchStax API request bodies (login password) are fed to `curl` via stdin for the same reason.
 
 The recommended (and default) place for the analytics key, per the [Acquia documentation](https://docs.acquia.com/acquia-cloud-platform/enabling-searchstax-module-and-routing-searches-through-it), is a [Key module](https://www.drupal.org/project/key) entity. The toolkit creates one named `searchstax_analytics_key` and points `searchstax.settings.key_id` at it. The Key module entity is itself stored in active Drupal config — which means it ends up in `config/sync/key.key.searchstax_analytics_key.yml` if you don't override the provider.
 

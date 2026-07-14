@@ -746,7 +746,7 @@ phase_done_mark() {
 # Print phase completion summary with elapsed time.
 phase_footer() {
   local phase="$1"
-  local end_time="$(date +%s)"
+  local end_time; end_time="$(date +%s)"
   local elapsed=$((end_time - PHASE_START_TIME))
   local mins=$((elapsed / 60))
   local secs=$((elapsed % 60))

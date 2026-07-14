@@ -12,11 +12,13 @@ Every phase is implemented as a single bash function in [`srsx-migrate`](../srsx
 | ---------------------------- | ------------------------------------------------------------------ |
 | Check `acli`, `composer`, `jq`, `git` are present | `command -v` (with platform-specific install hint on miss) |
 | Drupal/Drush version on target env | `drush status --format=json` parsed via `jq`                 |
-| Search-API server inventory  | `drush sapi-s --format=json` → `artifacts/inventory-<ts>/servers.json` |
-| Search-API index inventory   | `drush sapi-i --format=json` → `artifacts/inventory-<ts>/indexes.json` |
+| Search-API server inventory  | `drush search-api:server-list --format=json` → `artifacts/inventory-<ts>/servers-<site>.json` |
+| Search-API index inventory   | `drush search-api:status --format=json` → `artifacts/inventory-<ts>/indexes-<site>.json` |
 | Enabled module list          | `drush pm:list --type=module --status=enabled --format=json`       |
 
 Exits non-zero on Drupal 7, Drush <11, or failed bootstrap.
+
+Preflight is strictly **read-only** — the baseline reset-tracker/reindex the runbook asks for happens at the start of phase `index`, after `backup` has secured a restore point.
 
 ## `install`
 
@@ -31,10 +33,12 @@ Per site under multisite, the `drush` half is repeated with `--uri=…`.
 ## `backup`
 
 ```bash
-acli api:environments:database-backup-create ${ACQUIA_APP}.${ACQUIA_TARGET_ENV} default
+acli api:environments:database-list ${ACQUIA_APP}.${ACQUIA_TARGET_ENV}          # resolve the DB name
+acli api:environments:database-backup-create ${ACQUIA_APP}.${ACQUIA_TARGET_ENV} <db>
+acli api:environments:database-backup-list ${ACQUIA_APP}.${ACQUIA_TARGET_ENV} <db>   # polled until completed_at
 ```
 
-That's the entire phase. Acquia takes nightly backups already; this just adds an on-demand snapshot at exactly the pre-migration moment so you have a known-good restore point.
+The phase polls (up to 15 minutes) until the newest backup reports completion. If any API step fails, it falls back to prompting you to take the backup manually in the Cloud UI. Acquia takes nightly backups already; this just adds an on-demand snapshot at exactly the pre-migration moment so you have a known-good restore point.
 
 **There is no automated rollback.** If anything goes wrong on dev/stage, restore the DB with `acli pull:db` and `git revert` the migration commit. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the exact steps.
 
@@ -92,10 +96,12 @@ If verification fails, prints the manual UI fallback URL and pauses.
 For each Search-API index whose `server` is **not** `searchstax*`:
 
 ```bash
-SRSX_INDEX_ID=<id> SRSX_NEW_SERVER_ID=<server> drush php:script lib/php-eval/clone-index.php
+drush php:script /tmp/srsx-<run>/clone-index.php -- <index_id> <server_id>
 ```
 
-The PHP helper calls `\Drupal::service('solr_to_searchstax_ss_migration.utility')->cloneIndex($index, $server)` — the same code path the module's UI form uses. Falls back to `Index::createDuplicate()` if the service isn't present.
+The phase first offers a baseline reset-tracker + reindex of the legacy indexes (mutating, hence behind a confirm and the prod guard). Helpers are uploaded to the target env over `acli ssh` before execution — laptop-local paths and client environment variables do not survive the `acli remote:drush` SSH hop — and parameters travel as `php:script` arguments (drush's `$extra`).
+
+The helper clones with `Index::createDuplicate()`, strips `acquia_search` third-party settings (so the clone survives the module's removal at cleanup), and records the pair via `\Drupal::service('solr_to_searchstax_ss_migration.utility')->addCopiedIndex()` — the same bookkeeping the module's `CloneIndexesForm` uses. Re-runs are idempotent.
 
 Then for each new `*_searchstax` index:
 
@@ -108,11 +114,11 @@ drush sapi-i <new>     # index
 ## `views`
 
 ```bash
-drush php:script lib/php-eval/switch-view-index.php
+drush php:script /tmp/srsx-<run>/switch-view-index.php
 drush cr
 ```
 
-The PHP helper iterates every `views.view.*` config object and rewrites `display.<display>.display_options.query.options.index` from `<id>` to `<id>_searchstax`. It builds the rename map by looking at the `*_searchstax` indexes that exist on the SearchStax server, so it always matches whatever Phase `index` produced.
+A Search-API view binds to its index through the view's `base_table` (`search_api_index_<id>`) **and** a `table` key on every handler (fields, filters, sorts, arguments, relationships). The helper ports the module's `SearchViewSwitchIndexForm`: it records the original base table via `addOriginalBaseTable()` (enabling the module's rollback), sets `base_table` to the new index's table, and recursively switches every handler `table` key. The rename map comes from the module's `getCopiedIndexes()` bookkeeping, with a fallback scan for the `<id>_searchstax` naming convention. It exits non-zero if a map exists but nothing was switched.
 
 ## `route`
 
@@ -121,7 +127,8 @@ drush cset -y searchstax.settings searches_via_searchstudio 1
 drush cset -y searchstax.settings configure_via_searchstudio 0
 drush cset -y searchstax.settings analytics_url <url>          # if provided
 # Then, depending on SECRET_STORAGE:
-#   key   →  drush php:script create-key-entity.php; drush cset key_id searchstax_analytics_key
+#   key   →  drush php:script /tmp/srsx-<run>/create-key-entity.php -- <value_file>; drush cset key_id searchstax_analytics_key
+#            (the secret is uploaded as a file the helper deletes after reading — never argv)
 #   plain →  drush cset searchstax.settings analytics_key <value>
 drush cr
 ```
@@ -131,8 +138,8 @@ Config keys are taken from `searchstax.schema.yml` shipped with `drupal/searchst
 ## `validate`
 
 ```bash
-drush sapi-s --format=json | jq '.[].backend_config.connector_config.host'   # must contain searchstax.com
-drush sapi-i --format=json | jq '… select(.value.server | startswith("searchstax")) | "\(.key) \(.value.count)"'   # count > 0
+drush search-api:server-list --format=json | jq '.[].backend_config.connector_config.host'   # ≥1 host must contain searchstax.com
+drush search-api:status --format=json | jq '… select(.value.server | startswith("searchstax")) | "\(.key) \(.value.count)"'   # ≥1 index, count > 0
 ```
 
 Prints `[OK]` or `[WARN]` per check. Exits non-zero if any check failed.
