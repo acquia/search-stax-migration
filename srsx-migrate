@@ -1082,10 +1082,27 @@ EOF
       push_branch "$default_branch"
   [[ -n "$push_branch" ]] || err "Branch name cannot be empty."
 
-  ( cd "$REPO_ROOT" && run git add composer.json composer.lock )
+  # Classic Acquia git deploys ship the tree as-is — composer install does
+  # NOT run server-side. Repos that track dependency code in git (vendor/,
+  # modules/contrib/) must commit the newly required module code too, or the
+  # deployed env won't have it and the drush en below fails.
+  local -a stage_paths=(composer.json composer.lock)
+  local tracked_dep=""
+  tracked_dep="$( cd "$REPO_ROOT" && command git ls-files vendor docroot/modules/contrib web/modules/contrib 2>/dev/null | head -1 )"
+  if [[ -n "$tracked_dep" ]]; then
+    info "This repo commits dependency code to git (classic Acquia deploys do not run composer install)."
+    info "Staging the new module code alongside composer.json/lock."
+    local d
+    for d in vendor docroot/modules/contrib web/modules/contrib; do
+      [[ -d "$REPO_ROOT/$d" ]] && stage_paths+=("$d")
+    done
+  else
+    info "No dependency code tracked in git — assuming a build pipeline (e.g. Code Studio) runs composer install."
+  fi
+  ( cd "$REPO_ROOT" && run git add -- "${stage_paths[@]}" )
   ( cd "$REPO_ROOT" && run git status --short )
 
-  confirm "About to commit composer.json/lock and push to origin/${push_branch}"
+  confirm "About to commit the staged changes and push to origin/${push_branch}"
   ( cd "$REPO_ROOT" && run git commit -m "Search: install SearchStax migration modules" )
   ( cd "$REPO_ROOT" && run git push origin "$push_branch" )
   ok "Pushed to origin/${push_branch}."
@@ -1729,11 +1746,12 @@ _detect_config_dir() {
   return 1
 }
 
-phase_handoff() {
-  header "handoff" "${PHASE_DESC[handoff]}"
-  if phase_done_check handoff; then phase_skip_done handoff; return 0; fi
-  guard_against_prod
-
+# Export active config on the target env to a /tmp destination (the deployed
+# code tree is READ-ONLY on Acquia, so a bare `drush cex` into the tracked
+# sync dir fails), tar-pull it into the local repo's config dir, and stage
+# it. Shared by phase 'handoff' and phase 'cleanup'.
+_export_and_stage_config() {
+  local label="$1"
   local config_dir
   if ! config_dir="$(_detect_config_dir)"; then
     err "No Drupal config sync directory found in ${REPO_ROOT}.
@@ -1743,7 +1761,7 @@ phase_handoff() {
   info "Local config sync dir: ${config_dir}"
 
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
-  local remote_dir="/tmp/srsx-handoff-${ts}"
+  local remote_dir="/tmp/srsx-${label}-${ts}"
 
   info "Exporting config on ${ACQUIA_APP}.${EFFECTIVE_ENV} → ${remote_dir}"
   drush cex --destination="$remote_dir" -y
@@ -1763,8 +1781,17 @@ phase_handoff() {
       | tar -xf - -C "${REPO_ROOT}/${config_dir}"
   fi
 
-  ( cd "$REPO_ROOT" && run git add composer.json composer.lock 2>/dev/null || true )
   ( cd "$REPO_ROOT" && run git add "$config_dir" )
+}
+
+phase_handoff() {
+  header "handoff" "${PHASE_DESC[handoff]}"
+  if phase_done_check handoff; then phase_skip_done handoff; return 0; fi
+  guard_against_prod
+
+  _export_and_stage_config handoff
+
+  ( cd "$REPO_ROOT" && run git add composer.json composer.lock 2>/dev/null || true )
   ( cd "$REPO_ROOT" && run git status --short )
 
   cat <<EOF
@@ -1800,17 +1827,32 @@ phase_cleanup() {
 
   for_each_site _phase_cleanup_site
 
+  # Post-uninstall config must be exported and staged like handoff did —
+  # exporting into the deployed (read-only) sync dir on the env would fail,
+  # and an export nothing pulls back is lost work.
+  _export_and_stage_config cleanup
+
   # Composer remove (with safety guard).
   if [[ "${KEEP_ACQUIA_SEARCH_IN_COMPOSER:-0}" == "1" ]]; then
     warn "KEEP_ACQUIA_SEARCH_IN_COMPOSER=1 — leaving acquia_search in composer.json."
   else
     composer_in_repo remove --no-interaction drupal/acquia_search 2>/dev/null || \
       warn "composer remove drupal/acquia_search failed (already gone?)"
-    composer_in_repo remove --no-interaction drupal/acquia_connector 2>/dev/null || \
-      warn "composer remove drupal/acquia_connector failed (already gone?)"
   fi
 
-  composer_in_repo remove --no-interaction drupal/searchstax_solr_migration 2>/dev/null || true
+  # acquia_connector serves more than Acquia Search (subscription,
+  # telemetry, other Acquia products), so removing it is strictly opt-in.
+  if [[ "${REMOVE_ACQUIA_CONNECTOR:-0}" == "1" ]]; then
+    composer_in_repo remove --no-interaction drupal/acquia_connector 2>/dev/null || \
+      warn "composer remove drupal/acquia_connector failed (already gone?)"
+  else
+    info "Keeping acquia_connector (other Acquia services rely on it)."
+    info "  Set REMOVE_ACQUIA_CONNECTOR=1 in migration.env if this site truly no longer needs it."
+  fi
+
+  # NOTE: no `composer remove drupal/searchstax_solr_migration` here — that
+  # package does not exist; the migration submodule ships inside
+  # drupal/searchstax and only needs the module uninstall above.
 
   ok "Cleanup complete. Commit + deploy, then delete the legacy Solr index from the Acquia Cloud UI."
   phase_done_mark cleanup
@@ -1821,9 +1863,10 @@ _phase_cleanup_site() {
     warn "Could not uninstall solr_to_searchstax_ss_migration (already gone?)"
   drush pmu -y acquia_search 2>/dev/null || \
     warn "Could not uninstall acquia_search"
-  drush pmu -y acquia_connector 2>/dev/null || \
-    warn "Could not uninstall acquia_connector"
-  drush cex -y
+  if [[ "${REMOVE_ACQUIA_CONNECTOR:-0}" == "1" ]]; then
+    drush pmu -y acquia_connector 2>/dev/null || \
+      warn "Could not uninstall acquia_connector"
+  fi
 }
 
 # =============================================================================

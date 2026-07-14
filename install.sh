@@ -222,6 +222,11 @@ SECRET_STORAGE="key"
 # When uninstalling acquia_search at the end, set to 1 if your site depends on
 # acquia_cms_toolbar / acquia_cms_common (which require acquia_search).
 KEEP_ACQUIA_SEARCH_IN_COMPOSER=0
+
+# acquia_connector serves more than Acquia Search (subscription, telemetry,
+# other Acquia products). The cleanup phase leaves it installed unless you
+# explicitly opt in to removing it.
+REMOVE_ACQUIA_CONNECTOR=0
 ENVEOF
   # Operators may paste tokens in here; keep it out of other users' reach.
   chmod 600 "$ENVFILE"
