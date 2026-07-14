@@ -20,8 +20,7 @@
 $extra = $extra ?? [];
 $prefix = $extra[0] ?? '';
 if ($prefix === '') {
-  fwrite(STDERR, "[set-multisite-prefix] Usage: drush php:script set-multisite-prefix.php -- <prefix>\n");
-  exit(1);
+  throw new \RuntimeException("[set-multisite-prefix] Usage: drush php:script set-multisite-prefix.php -- <prefix>");
 }
 
 $indexStorage = \Drupal::entityTypeManager()->getStorage('search_api_index');
@@ -39,4 +38,4 @@ foreach ($indexStorage->loadMultiple() as $idx) {
 }
 
 fwrite(STDOUT, "[set-multisite-prefix] Updated {$count} index(es).\n");
-exit(0);
+return;

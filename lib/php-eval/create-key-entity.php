@@ -22,18 +22,17 @@ $valueFile = $extra[0] ?? '';
 $keyId = $extra[1] ?? 'searchstax_analytics_key';
 
 if ($valueFile === '' || !is_file($valueFile)) {
-  fwrite(STDERR, "[create-key-entity] Usage: drush php:script create-key-entity.php -- <value_file> [key_id]\n");
-  exit(1);
+  throw new \RuntimeException("[create-key-entity] Usage: drush php:script create-key-entity.php -- <value_file> [key_id]");
+}
+// Check preconditions BEFORE consuming the value file, so a failed run can
+// be retried without re-uploading the secret.
+if (!\Drupal::moduleHandler()->moduleExists('key')) {
+  throw new \RuntimeException("[create-key-entity] The 'key' module is not enabled.");
 }
 $value = file_get_contents($valueFile);
 @unlink($valueFile);
 if ($value === FALSE || $value === '') {
-  fwrite(STDERR, "[create-key-entity] Could not read a non-empty key value from {$valueFile}.\n");
-  exit(1);
-}
-if (!\Drupal::moduleHandler()->moduleExists('key')) {
-  fwrite(STDERR, "[create-key-entity] The 'key' module is not enabled.\n");
-  exit(1);
+  throw new \RuntimeException("[create-key-entity] Could not read a non-empty key value from {$valueFile}.");
 }
 
 $storage = \Drupal::entityTypeManager()->getStorage('key');
@@ -55,4 +54,4 @@ if (!$entity) {
 }
 $entity->save();
 fwrite(STDOUT, "[create-key-entity] Saved key entity '{$keyId}'\n");
-exit(0);
+return;

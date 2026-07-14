@@ -24,15 +24,13 @@ $file = $extra[0] ?? '';
 $name = $extra[1] ?? '';
 
 if ($file === '' || $name === '') {
-  fwrite(STDERR, "[import-config-yaml] Usage: drush php:script import-config-yaml.php -- <yaml_file> <config_name>\n");
-  exit(1);
+  throw new \RuntimeException("[import-config-yaml] Usage: drush php:script import-config-yaml.php -- <yaml_file> <config_name>");
 }
 if (!is_file($file)) {
-  fwrite(STDERR, "[import-config-yaml] File not found: {$file}\n");
-  exit(1);
+  throw new \RuntimeException("[import-config-yaml] File not found: {$file}");
 }
 
 $data = Yaml::parseFile($file);
 \Drupal::configFactory()->getEditable($name)->setData($data)->save();
 fwrite(STDOUT, "[import-config-yaml] Imported {$name} from {$file}\n");
-exit(0);
+return;
