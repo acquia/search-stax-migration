@@ -195,11 +195,27 @@ ok()   { printf '%s[OK]%s %s\n' "$C_OK" "$C_RST" "$*"; }
 warn() { printf '%s[WARN]%s %s\n' "$C_WARN" "$C_RST" "$*" >&2; }
 err()  { printf '%s[ERROR]%s %s\n' "$C_ERR" "$C_RST" "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
-dim()  { printf '%s%s%s\n' "$C_DIM" "$*" "$C_RST"; }
+
+# Replace every known secret value in a string with [redacted]. Everything we
+# print is tee'd to logs/*.log, so no audit/dim line may carry a live secret.
+# Values shorter than 4 chars are skipped (masking "1" would shred output).
+srsx_redact() {
+  local s="$1" v
+  for v in "${SEARCHSTAX_READ_TOKEN:-}" "${SEARCHSTAX_WRITE_TOKEN:-}" \
+           "${SEARCHSTAX_ANALYTICS_KEY:-}" "${SEARCHSTAX_PASS:-}" \
+           "${SSX_TOKEN:-}" "${SSX_API_PASSWORD:-}" "${SSX_ENGINE_PASSWORD:-}"; do
+    if [[ -n "$v" && ${#v} -ge 4 ]]; then
+      s="${s//"$v"/[redacted]}"
+    fi
+  done
+  printf '%s' "$s"
+}
+
+dim()  { printf '%s%s%s\n' "$C_DIM" "$(srsx_redact "$*")" "$C_RST"; }
 
 # Emit a `+ command` audit line in dim grey before executing.
 audit() {
-  printf '%s+ %s%s\n' "$C_DIM" "$*" "$C_RST"
+  printf '%s+ %s%s\n' "$C_DIM" "$(srsx_redact "$*")" "$C_RST"
 }
 
 # =============================================================================
@@ -1352,6 +1368,8 @@ _save_env_var() {
   if [[ ! -f "$envfile" ]]; then
     printf '# srsx-migrate runtime config (created %s)\n' "$(date)" > "$envfile"
   fi
+  # Operators may paste tokens in here; keep it out of other users' reach.
+  chmod 600 "$envfile" 2>/dev/null || true
   if grep -q "^${key}=" "$envfile"; then
     # Use a temp file rather than sed -i to stay portable across BSD/GNU.
     awk -v k="$key" -v v="$val" \

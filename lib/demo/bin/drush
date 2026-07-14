@@ -48,7 +48,9 @@ case "$sub" in
   sapi-i|search-api:index)                echo "Indexed items for ${args[1]:-(all)}." ;;
   pm:list|pml)                            emit drush-pm-list.json ;;
   config:get|cget)                        emit drush-config-get.json ;;
-  config:set|cset)                        echo "Set ${args[1]:-?} ${args[2]:-?} = ${args[3]:-?}." ;;
+  # Real `drush cset -y` does not echo the value — and echoing it here would
+  # leak secrets (e.g. analytics_key in plain mode) into the tee'd log.
+  config:set|cset)                        echo "Set ${args[1]:-?} ${args[2]:-?}." ;;
   config:export|cex)                      echo "Configuration successfully exported." ;;
   config:import|cim)                      echo "Configuration successfully imported." ;;
   cache:rebuild|cr)                       echo "Cache rebuild complete." ;;

@@ -223,6 +223,8 @@ SECRET_STORAGE="key"
 # acquia_cms_toolbar / acquia_cms_common (which require acquia_search).
 KEEP_ACQUIA_SEARCH_IN_COMPOSER=0
 ENVEOF
+  # Operators may paste tokens in here; keep it out of other users' reach.
+  chmod 600 "$ENVFILE"
   ok "Wrote default migration.env"
 fi
 

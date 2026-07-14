@@ -87,13 +87,20 @@ ssx_http() {
   if [[ -n "$SSX_TOKEN" ]]; then
     args+=(-H "Authorization: Token $SSX_TOKEN")
   fi
+  # The body may carry credentials (login password, app passwords). Feed it
+  # via stdin (--data-binary @-) so it never appears in the process argv,
+  # where `ps` on a shared machine could read it.
   if [[ -n "$body" ]]; then
-    args+=(-H "Content-Type: application/json" --data-binary "$body")
+    args+=(-H "Content-Type: application/json" --data-binary @-)
   fi
 
   audit "curl -X $method $url"
   local code
-  code="$(curl "${args[@]}" 2>/dev/null)" || code="000"
+  if [[ -n "$body" ]]; then
+    code="$(curl "${args[@]}" 2>/dev/null <<<"$body")" || code="000"
+  else
+    code="$(curl "${args[@]}" 2>/dev/null </dev/null)" || code="000"
+  fi
   cat "$tmp"
   local detail=""
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
