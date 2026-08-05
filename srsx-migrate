@@ -925,6 +925,67 @@ for_each_site() {
   DRUSH_URI=""
 }
 
+# ---------------------------------------------------------------------------
+# Multisite step results — for per-site phases (esp. install), let a drush
+# command that fails on one site NOT abort the whole run. Each step is recorded
+# and, at the end of the phase, srsx_site_summary() prints a pass/fail table so
+# the operator can see exactly what worked and what failed across every --uri.
+# ---------------------------------------------------------------------------
+declare -a SRSX_SITE_RESULTS=()   # rows: "<ok|fail>\t<site>\t<step>"
+SRSX_SITE_HAD_FAILURE=0
+
+# Reset the tracker at the start of a per-site phase.
+srsx_site_results_reset() {
+  SRSX_SITE_RESULTS=()
+  SRSX_SITE_HAD_FAILURE=0
+}
+
+# site_step <description> <command...> — run a command for the current site,
+# tolerate failure (never abort the phase), and record the outcome. Always
+# returns 0 so a failing step can't trip `set -e` in the caller; inspect
+# SRSX_SITE_HAD_FAILURE if you need to branch.
+site_step() {
+  local desc="$1"; shift
+  local site="${DRUSH_URI:-default}"
+  local rc=0
+  "$@" || rc=$?
+  if (( rc == 0 )); then
+    SRSX_SITE_RESULTS+=("ok"$'\t'"${site}"$'\t'"${desc}")
+    ok "${desc} — OK${DRUSH_URI:+ on ${site}}"
+  else
+    SRSX_SITE_RESULTS+=("fail"$'\t'"${site}"$'\t'"${desc} (exit ${rc})")
+    SRSX_SITE_HAD_FAILURE=1
+    warn "${desc} — FAILED (exit ${rc})${DRUSH_URI:+ on ${site}}. Continuing to the next step/site."
+  fi
+  return 0
+}
+
+# srsx_site_summary <phase-label> — print the collected per-site results.
+# Returns non-zero if any step failed so the caller can decide whether to mark
+# the phase done.
+srsx_site_summary() {
+  local label="$1"
+  (( ${#SRSX_SITE_RESULTS[@]} == 0 )) && return 0
+  info ""
+  info "── ${label}: per-site results ─────────────────────────────────────────"
+  local row st site step
+  for row in "${SRSX_SITE_RESULTS[@]}"; do
+    IFS=$'\t' read -r st site step <<< "$row"
+    if [[ "$st" == "ok" ]]; then
+      ok "  [${site}] ${step}"
+    else
+      warn "  [${site}] ${step}"
+    fi
+  done
+  info "──────────────────────────────────────────────────────────────────────"
+  if (( SRSX_SITE_HAD_FAILURE )); then
+    warn "One or more steps failed above. Fix the affected site(s), then re-run"
+    warn "'./srsx-migrate ${label} --force' — steps that already passed are safe to repeat."
+    return 1
+  fi
+  return 0
+}
+
 # =============================================================================
 # PHASE A — Installer / scaffolding
 # =============================================================================
@@ -1175,19 +1236,23 @@ deploy to finish before continuing.
 EOF
   confirm "Has Acquia finished deploying '${push_branch}' to ${EFFECTIVE_ENV}?"
 
+  srsx_site_results_reset
   for_each_site _phase_install_site
-  phase_done_mark install
+  if srsx_site_summary "install"; then
+    phase_done_mark install
+  else
+    warn "Leaving 'install' un-done because at least one site failed; re-run after fixing."
+  fi
 }
 
 _phase_install_site() {
-  info "Updating database schemas (drush updb)"
-  drush updb -y
-  info "Rebuilding cache (drush cr)"
-  drush cr
-  info "Enabling modules: search_api search_api_solr searchstax solr_to_searchstax_ss_migration key"
-  drush en -y search_api search_api_solr searchstax solr_to_searchstax_ss_migration key
-  drush cr
-  ok "Modules enabled${DRUSH_URI:+ on ${DRUSH_URI}}."
+  local site="${DRUSH_URI:-default}"
+  info "${C_BOLD}Enabling SearchStax modules on ${site}${C_RST}"
+  site_step "drush updb"              drush updb -y
+  site_step "drush cr (pre-enable)"   drush cr
+  site_step "drush en search modules" \
+    drush en -y search_api search_api_solr searchstax solr_to_searchstax_ss_migration key
+  site_step "drush cr (post-enable)"  drush cr
 }
 
 # =============================================================================
