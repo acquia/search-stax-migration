@@ -416,16 +416,13 @@ git_commit_safe() {
   fi
 }
 
-# _stage_install_changes — stage composer.json/lock plus any Composer-built
-# artifact dirs that this repo actually commits. Whether a dir is committed or
-# left to Acquia's build pipeline is decided by git itself: we simply try to
-# `git add` each artifact dir and let git skip the ones it ignores — we never
-# force-add an ignored path and never abort the phase because of one. Sets
-# SRSX_COMMITTED_ARTIFACTS=1 if any built artifact was actually staged, else 0
-# (source / push-artifact workflow).
-SRSX_COMMITTED_ARTIFACTS=0
+# _stage_install_changes — stage EVERYTHING Composer produced so the pushed
+# branch is a complete, deployable tree that never depends on an external build
+# step. composer.json/lock plus the built code (vendor/ and contrib
+# modules/themes/profiles/libraries/core) are staged with `git add -f`, so even
+# repos that git-ignore those dirs still commit and push the actual code. This
+# guarantees the deploy contains everything.
 _stage_install_changes() {
-  SRSX_COMMITTED_ARTIFACTS=0
   ( cd "$REPO_ROOT" && run git add composer.json composer.lock )
 
   local -a artifact_dirs=(
@@ -433,85 +430,25 @@ _stage_install_changes() {
     docroot/core docroot/modules/contrib docroot/themes/contrib docroot/profiles/contrib docroot/libraries
     web/core     web/modules/contrib     web/themes/contrib     web/profiles/contrib     web/libraries
   )
-  local d
+  local d staged=0
   for d in "${artifact_dirs[@]}"; do
     [[ -d "${REPO_ROOT}/${d}" ]] || continue
-    if [[ "$DRY_RUN" == "1" ]]; then
-      audit "git add $d  (if not git-ignored)"
-      continue
-    fi
-    # Try to stage it. If git refuses because the path is ignored (the build
-    # pipeline manages it), that returns non-zero — swallow it and move on;
-    # never let it abort the phase. Only count it as a committed artifact if
-    # something was actually staged.
-    if ( cd "$REPO_ROOT" && command git add "$d" 2>/dev/null ); then
-      if ! ( cd "$REPO_ROOT" && command git diff --cached --quiet -- "$d" 2>/dev/null ); then
-        audit "git add $d"
-        SRSX_COMMITTED_ARTIFACTS=1
-      fi
+    # -f forces staging even when the dir is git-ignored (build-artifact repos),
+    # so the full Composer output is committed. Tolerate an empty/failed add so
+    # a single dir never aborts the phase.
+    if ( cd "$REPO_ROOT" && run git add -f "$d" ); then
+      staged=1
+    else
+      warn "Could not stage ${d} — continuing."
     fi
   done
 
-  if (( SRSX_COMMITTED_ARTIFACTS )); then
-    info "Committed-artifact workflow: this repo tracks Composer-built code, so"
-    info "vendor/contrib were staged alongside composer.json/lock."
+  if (( staged )); then
+    info "Staged composer.json/lock + all Composer-built code (vendor, contrib,"
+    info "libraries) with 'git add -f' so the full tree is committed and pushed."
   else
-    info "Source / push-artifact workflow: vendor & contrib are git-ignored, so"
-    info "only composer.json + composer.lock were staged (Acquia builds the rest)."
+    info "Staged composer.json + composer.lock (no vendor/contrib dirs present yet)."
   fi
-}
-
-# _maybe_push_artifact <branch> — for source/push-artifact repos, the pushed
-# branch contains composer.json/lock but no built code. Offer to build + deploy
-# it with `acli push:artifact`. Verify prerequisites, ask, and ALWAYS continue —
-# a declined or failed artifact push must never stop the migration.
-_maybe_push_artifact() {
-  local branch="$1"
-  local target="${ACQUIA_APP}.${EFFECTIVE_ENV}"
-
-  cat <<EOF
-
-This repo git-ignores vendor/ and contrib (Acquia build-artifact workflow), so
-the branch you just pushed has composer.json/lock but NOT the built code.
-Acquia can build and deploy it for you with:
-
-    acli push:artifact ${target} --destination-git-branch=${branch}
-
-EOF
-
-  # In demo mode we never prompt (keeps scripted DEMO_ANSWERS in sync) and never
-  # invoke the real CLI.
-  if [[ "$DEMO" == "1" ]]; then
-    info "(demo) Skipping the interactive push:artifact step."
-    return 0
-  fi
-
-  if ! command -v acli >/dev/null 2>&1; then
-    warn "acli not found on PATH — skipping automatic push:artifact."
-    info "Run the command above yourself (or deploy via the Acquia Cloud UI), then continue."
-    return 0
-  fi
-
-  local do_it="n"
-  ask "Run 'acli push:artifact ${target} --destination-git-branch=${branch}' now? [y/N]" \
-      do_it "n"
-  case "$do_it" in
-    y|Y|yes|YES)
-      local rc=0
-      ( run acli push:artifact "${target}" --destination-git-branch="${branch}" ) || rc=$?
-      if (( rc == 0 )); then
-        ok "Artifact built and pushed to '${branch}'."
-      else
-        warn "acli push:artifact exited ${rc}. Review the output above; you can re-run:
-       acli push:artifact ${target} --destination-git-branch=${branch}
-     Continuing without stopping the migration."
-      fi
-      ;;
-    *)
-      info "Skipping automatic push:artifact. Deploy '${branch}' via the command above
-     or the Acquia Cloud UI, then continue."
-      ;;
-  esac
 }
 
 # =============================================================================
@@ -1215,7 +1152,7 @@ EOF
   _stage_install_changes
   ( cd "$REPO_ROOT" && run git status --short )
 
-  confirm "About to commit composer.json/lock and push to origin/${push_branch}"
+  confirm "About to commit composer.json/lock + built code and push to origin/${push_branch}"
   git_commit_safe "Search: install SearchStax migration modules"
   local push_rc=0
   ( cd "$REPO_ROOT" && run git push origin "$push_branch" ) || push_rc=$?
@@ -1223,14 +1160,7 @@ EOF
     ok "Pushed to origin/${push_branch}."
   else
     warn "git push exited ${push_rc}. Resolve the push (auth, protected branch, etc.),
-     then re-run 'git push origin ${push_branch}' or './srsx-migrate install --force'.
-     Continuing so you can still deploy via push:artifact below."
-  fi
-
-  # Source/push-artifact repos: the pushed branch has no built code. Offer to
-  # build + deploy it with acli. Verify, ask, and always continue.
-  if (( SRSX_COMMITTED_ARTIFACTS == 0 )); then
-    _maybe_push_artifact "$push_branch"
+     then re-run 'git push origin ${push_branch}' or './srsx-migrate install --force'."
   fi
 
   # Deploy is a manual step (especially on ACSF, where pushing a branch does
