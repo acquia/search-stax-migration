@@ -291,6 +291,167 @@ composer_in_repo() {
   ( cd "$REPO_ROOT" && run command composer "$@" )
 }
 
+# composer_in_repo_capture <args...> — like composer_in_repo, but captures the
+# combined stdout+stderr into SRSX_COMPOSER_OUTPUT (while still echoing it) and
+# returns composer's real exit code WITHOUT tripping `set -e`, so the caller can
+# inspect the result and report per-package status. Under --dry-run it is a
+# no-op that returns success.
+SRSX_COMPOSER_OUTPUT=""
+composer_in_repo_capture() {
+  audit "composer $*"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    SRSX_COMPOSER_OUTPUT=""
+    return 0
+  fi
+  local _out _rc=0
+  _out="$( cd "$REPO_ROOT" && command composer "$@" 2>&1 )" || _rc=$?
+  printf '%s\n' "$_out"
+  SRSX_COMPOSER_OUTPUT="$_out"
+  return "$_rc"
+}
+
+# _report_composer_result <rc> <pkg...> — inspect SRSX_COMPOSER_OUTPUT (the
+# output of the preceding `composer require`) and tell the user, per package,
+# whether it was newly installed, updated, or already present. Anything that
+# cannot be accounted for is counted in SRSX_INSTALL_MISSING and, if the
+# require itself failed, aborts with actionable guidance.
+SRSX_INSTALL_MISSING=0
+_report_composer_result() {
+  local rc="$1"; shift
+  local out="$SRSX_COMPOSER_OUTPUT"
+  SRSX_INSTALL_MISSING=0
+
+  info ""
+  info "── Composer install verification ─────────────────────────────────────"
+
+  local pkg esc ver
+  for pkg in "$@"; do
+    esc="${pkg//./\\.}"
+    # Version this run reported for the package, if any (e.g. "1.11.0").
+    # `|| true` keeps a no-match grep from tripping set -e/pipefail on assign.
+    ver="$( { printf '%s\n' "$out" \
+      | grep -oiE "(Installing|Locking|Upgrading|Updating|Downgrading) ${esc} \([^)]+\)" \
+      | grep -oE '\([^)]+\)' | tr -d '()' | head -n1; } || true )"
+
+    if printf '%s\n' "$out" | grep -qiE "Installing ${esc} \("; then
+      ok "  installed   ${pkg}${ver:+ (${ver})}"
+    elif printf '%s\n' "$out" | grep -qiE "(Upgrading|Updating|Downgrading) ${esc} \("; then
+      ok "  updated     ${pkg}${ver:+ (${ver})}"
+    elif (( rc == 0 )); then
+      # require succeeded but composer performed no operation for this package,
+      # so it was already present at a satisfying version. Confirm the exact
+      # installed version via `composer show` (skipped in demo/dry-run).
+      local cur=""
+      if [[ "$DEMO" != "1" && "$DRY_RUN" != "1" ]]; then
+        cur="$( { cd "$REPO_ROOT" && command composer show "$pkg" 2>/dev/null \
+                | awk '/^versions/ {print $NF; exit}'; } || true )"
+      fi
+      ok "  up-to-date  ${pkg}${cur:+ (${cur})} — already installed, no change"
+    else
+      warn "  FAILED      ${pkg} — not installed (composer require exited ${rc})"
+      SRSX_INSTALL_MISSING=$((SRSX_INSTALL_MISSING+1))
+    fi
+  done
+  info "──────────────────────────────────────────────────────────────────────"
+
+  if (( rc != 0 )) || (( SRSX_INSTALL_MISSING > 0 )); then
+    err "composer require failed (exit ${rc}, ${SRSX_INSTALL_MISSING} package(s) missing).
+       Review the composer output above, resolve the conflict, then re-run:
+         ./srsx-migrate install --force"
+  fi
+}
+
+# _ensure_tools_gitignore — make sure the toolkit directory is git-ignored in
+# the customer's repo. tools/searchstax-migration/ holds runtime state, logs,
+# artifacts and migration.env (which may contain secrets); none of it belongs
+# in the deployable code, and it can be reinstalled any time via install.sh.
+# Idempotent: only writes the file if it is missing.
+_ensure_tools_gitignore() {
+  local gi="${SRSX_HOME}/.gitignore"
+  [[ -e "$gi" ]] && return 0
+  cat > "$gi" <<'GITIGNORE_EOF'
+# Managed by srsx-migrate — do NOT commit the migration toolkit into your repo.
+# This directory holds runtime state, logs, artifacts, and migration.env
+# (which may contain secrets). Reinstall any time via install.sh.
+*
+GITIGNORE_EOF
+  info "Wrote ${gi} (keeps the toolkit + migration.env out of your repo)."
+}
+
+# git_commit_safe <message> — commit staged changes in REPO_ROOT without dying
+# under `set -e` when there is genuinely nothing to commit (idempotent re-runs),
+# and surface a clear, actionable error for the two failure modes that
+# otherwise stop the script silently mid-commit: a missing git identity and a
+# rejecting pre-commit hook.
+git_commit_safe() {
+  local msg="$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "git commit -m \"$msg\""
+    return 0
+  fi
+  # Nothing staged → nothing to commit. Not an error (e.g. resuming a run whose
+  # commit already landed).
+  if ( cd "$REPO_ROOT" && command git diff --cached --quiet 2>/dev/null ); then
+    info "Nothing staged to commit — skipping commit (already committed?)."
+    return 0
+  fi
+  # A missing user.name/user.email makes `git commit` fail with a confusing
+  # message and, under set -e, kills the whole run.
+  local gname gemail
+  gname="$( cd "$REPO_ROOT" && command git config user.name  2>/dev/null || true )"
+  gemail="$( cd "$REPO_ROOT" && command git config user.email 2>/dev/null || true )"
+  if [[ -z "$gname" || -z "$gemail" ]]; then
+    err "git identity is not configured in ${REPO_ROOT}, so the commit was skipped.
+       Set it, then re-run './srsx-migrate install --force':
+         git -C \"${REPO_ROOT}\" config user.name  \"Your Name\"
+         git -C \"${REPO_ROOT}\" config user.email \"you@example.com\""
+  fi
+  local rc=0
+  ( cd "$REPO_ROOT" && run git commit -m "$msg" ) || rc=$?
+  if (( rc != 0 )); then
+    err "git commit failed (exit ${rc}) in ${REPO_ROOT}.
+       A pre-commit hook or repository policy likely rejected the commit.
+       Review the output above, resolve it, then re-run:
+         ./srsx-migrate install --force"
+  fi
+}
+
+# _stage_install_changes — git add the composer changes for the install phase.
+# Detects whether the repo commits Composer-built artifacts (vendor/, contrib
+# modules — the "committed artifact" workflow used by customers who do NOT rely
+# on Acquia's build/push-artifact pipeline) or lets Acquia build them on deploy,
+# and stages the right set of paths accordingly.
+_stage_install_changes() {
+  local -a paths=(composer.json composer.lock)
+  local -a artifact_dirs=(
+    vendor
+    docroot/modules/contrib docroot/themes/contrib docroot/libraries
+    web/modules/contrib     web/themes/contrib     web/libraries
+  )
+  local committed=0 d
+  for d in "${artifact_dirs[@]}"; do
+    [[ -d "${REPO_ROOT}/${d}" ]] || continue
+    # `git check-ignore -q` exits 0 when the path IS ignored. If vendor/contrib
+    # is NOT ignored, the customer commits Composer's output → stage it too.
+    if ! ( cd "$REPO_ROOT" && command git check-ignore -q "$d" 2>/dev/null ); then
+      paths+=("$d")
+      committed=1
+    fi
+  done
+
+  if (( committed )); then
+    warn "Committed-artifact workflow detected (vendor/contrib are NOT git-ignored)."
+    info "This repo does not use Acquia's push-artifact pipeline, so the actual"
+    info "Composer-built code must be committed. Staging:"
+    printf '    %s\n' "${paths[@]}"
+  else
+    info "Acquia build-artifact workflow detected (vendor is git-ignored or absent)."
+    info "Staging composer.json + composer.lock only; Acquia builds vendor on deploy."
+  fi
+
+  ( cd "$REPO_ROOT" && run git add "${paths[@]}" )
+}
+
 # =============================================================================
 # INTERACTIVE PROMPTS
 # =============================================================================
@@ -950,11 +1111,24 @@ it shows exactly what the steps below do in the Acquia UI.
 EOF
   confirm "Ready to require the SearchStax + Search-API modules in composer?"
 
-  composer_in_repo require --no-interaction --no-progress \
+  _ensure_tools_gitignore
+
+  local -a install_pkgs=(
+    drupal/search_api
+    drupal/search_api_solr
+    drupal/searchstax
+    drupal/key
+  )
+  local composer_rc=0
+  composer_in_repo_capture require --no-interaction --no-progress \
     drupal/search_api:^1 \
     drupal/search_api_solr:^4 \
     drupal/searchstax:^1.11 \
-    drupal/key:^1
+    drupal/key:^1 || composer_rc=$?
+
+  # Verify the result and report per-package status (installed / updated /
+  # already present / failed). Aborts with guidance if anything is missing.
+  _report_composer_result "$composer_rc" "${install_pkgs[@]}"
 
   ok "composer.json + composer.lock updated locally."
 
@@ -976,11 +1150,11 @@ EOF
       push_branch "$default_branch"
   [[ -n "$push_branch" ]] || err "Branch name cannot be empty."
 
-  ( cd "$REPO_ROOT" && run git add composer.json composer.lock )
+  _stage_install_changes
   ( cd "$REPO_ROOT" && run git status --short )
 
   confirm "About to commit composer.json/lock and push to origin/${push_branch}"
-  ( cd "$REPO_ROOT" && run git commit -m "Search: install SearchStax migration modules" )
+  git_commit_safe "Search: install SearchStax migration modules"
   ( cd "$REPO_ROOT" && run git push origin "$push_branch" )
   ok "Pushed to origin/${push_branch}."
 

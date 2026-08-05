@@ -163,6 +163,19 @@ fi
 
 mkdir -p "$DEST"/{lib/php-eval,lib/demo/bin,lib/demo/fixtures,templates,artifacts,logs,state}
 
+# Keep the toolkit (and especially migration.env, which may hold secrets) out
+# of the customer's repo/deploy. Written once; preserved if already present.
+GITIGNORE="${DEST}/.gitignore"
+if [[ ! -e "$GITIGNORE" ]]; then
+  cat > "$GITIGNORE" <<'GITIGNORE_EOF'
+# Managed by srsx-migrate — do NOT commit the migration toolkit into your repo.
+# This directory holds runtime state, logs, artifacts, and migration.env
+# (which may contain secrets). Reinstall any time via install.sh.
+*
+GITIGNORE_EOF
+  ok "Wrote ${GITIGNORE} (keeps the toolkit + migration.env out of your repo)"
+fi
+
 head "Downloading toolkit files"
 for relpath in "${FILES[@]}"; do
   dest="${DEST}/${relpath}"
