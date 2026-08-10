@@ -39,7 +39,7 @@ check: lint
 test:
 	@rm -rf state/ artifacts/ logs/ /tmp/srsx-demo-home-mtest
 	@SRSX_DEMO_HOME=/tmp/srsx-demo-home-mtest \
-	 DEMO_ANSWERS="demoapp,dev,n,main,https://demo.searchstax.com,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
+	 DEMO_ANSWERS="demoapp,dev,n,,main,https://demo.searchstax.com,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
 	    ./srsx-migrate --demo all </dev/null >/tmp/srsx-demo.log 2>&1 \
 	    && echo "  demo end-to-end OK (log: /tmp/srsx-demo.log)" \
 	    || { tail -30 /tmp/srsx-demo.log; exit 1; }

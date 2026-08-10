@@ -261,44 +261,44 @@ drush_capture() {
 # drush_php <script.php> [KEY=VALUE ...] — run one of lib/php-eval/*.php on the
 # REMOTE environment.
 #
-# `drush php:script` cannot be used here: drush executes on the Acquia server,
-# but the toolkit lives in a gitignored tools/ directory that is never deployed,
-# so the file does not exist remotely — and SRSX_* variables set locally do not
-# survive the SSH hop, so getenv() would come back empty anyway.
+# The toolkit lives in a gitignored tools/ directory that is never deployed, so
+# a local path means nothing remotely, and SRSX_* variables set locally do not
+# survive the SSH hop.
 #
-# The command crosses acli, ssh and a remote `bash -c`, and bash aborts a whole
-# line on a single syntax error, so anything it can parse is a hazard. Every
-# shell-hostile character therefore lives INSIDE the base64 blob — the putenv()
-# calls, the quotes, the newlines, the return-code capture. All the remote shell
-# ever sees is eval(base64_decode("<alphanumerics>")).
+# Passing the code as an argument does not work either. acli builds the remote
+# command by joining argv into a `bash -c` string and drops any quoting on the
+# way, so the remote shell always parses the payload:
+#   cd …/docroot; drush --uri=… php:eval /*…*/eval(base64_decode("…"));
+#   /bin/bash: -c: line 0: syntax error near unexpected token `('
+# No amount of quoting survives that, because the quotes themselves are eaten.
 #
-# The script body is wrapped in a closure so its top-level `return` becomes the
-# status; it must not exit(), which would kill drush mid-command.
+# So the script never travels through argv: it is piped over stdin, which acli
+# does not touch, and only shell-safe paths appear on the command line. The body
+# is wrapped in a closure so its top-level `return` becomes the status, and it
+# must not exit(), which would kill drush mid-command.
 drush_php() {
   local script="$1"; shift
   local file="${SCRIPT_DIR}/lib/php-eval/${script}"
   [[ -f "$file" ]] || err "php-eval script missing: ${file}"
 
   local marker="SRSXOK${$}"
-  local inner="" kv key val b64
+  local body='<?php'$'\n'
+  local kv key val b64
   for kv in "$@"; do
     key="${kv%%=*}"; val="${kv#*=}"
     b64="$(printf '%s' "$val" | base64 | tr -d '\n')"
-    inner+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
+    body+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
   done
-  inner+="echo '${marker}' . PHP_EOL;"$'\n'
+  body+="echo '${marker}' . PHP_EOL;"$'\n'
   # shellcheck disable=SC2016 # $srsxrc is PHP, not shell — it must stay literal.
-  inner+='$srsxrc = (function () {'$'\n'
-  # Drop the opening <?php tag; php:eval evaluates a raw PHP body.
-  inner+="$(tail -n +2 "$file")"$'\n'
-  inner+='})();'$'\n'
-  inner+="echo '${marker}RC' . intval(\$srsxrc) . PHP_EOL;"$'\n'
+  body+='$srsxrc = (function () {'$'\n'
+  body+="$(tail -n +2 "$file")"$'\n'
+  body+='})();'$'\n'
+  body+="echo '${marker}RC' . intval(\$srsxrc) . PHP_EOL;"$'\n'
 
-  local payload code
-  payload="$(printf '%s' "$inner" | base64 | tr -d '\n')"
-  code="/*srsx-script:${script}*/eval(base64_decode(\"${payload}\"));"
-
-  local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>"
+  local remote_dir="/tmp/srsx-${$}"
+  local remote_file="${remote_dir}/${script}"
+  local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:script ${script}"
   info "Running ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ (${DRUSH_URI})}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -306,23 +306,38 @@ drush_php() {
     return 0
   fi
   if [[ "$DEMO" == "1" ]]; then
-    SRSX_AUDIT_OVERRIDE="$label" drush php:eval "$code"
+    SRSX_AUDIT_OVERRIDE="$label" drush php:script "$remote_file"
     return 0
   fi
 
-  local attempt out phprc
-  for attempt in "'${code}'" "${code}"; do
-    out="$(SRSX_AUDIT_OVERRIDE="$label" drush php:eval "$attempt" 2>&1)" || true
-    # No marker means PHP never evaluated the payload — try the other quoting.
-    [[ "$out" == *"$marker"* ]] || continue
+  # Ship the script over stdin. Every token on the command line here is a plain
+  # path, so there is nothing for the remote shell to misparse.
+  audit "acli ssh ${ACQUIA_APP}.${EFFECTIVE_ENV} -- cat > ${remote_file}"
+  printf '%s' "$body" \
+    | acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "mkdir -p ${remote_dir} && cat > ${remote_file}" \
+    || err "Could not copy ${script} to ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+       'acli ssh' must be able to reach the environment for this phase to run."
 
-    phprc="$(sed -n "s/.*${marker}RC\([0-9][0-9]*\).*/\1/p" <<<"$out" | tail -1)"
-    printf '%s\n' "$out" | grep -vF "$marker" || true
+  local out
+  out="$(SRSX_AUDIT_OVERRIDE="$label" drush php:script --script-path="$remote_dir" "$script" 2>&1)" || true
+  if [[ "$out" != *"$marker"* ]]; then
+    # Older drush without --script-path: name the file outright.
+    out="$(SRSX_AUDIT_OVERRIDE="$label" drush php:script "$remote_file" 2>&1)" || true
+  fi
+  acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "rm -rf ${remote_dir}" >/dev/null 2>&1 || true
 
-    if [[ -z "$phprc" ]]; then
-      # Started but never returned: a PHP fatal, usually a failed bootstrap.
-      if [[ "$out" == *"container is not initialized"* ]]; then
-        err "Drupal did not bootstrap on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ for --uri=${DRUSH_URI}}.
+  if [[ "$out" != *"$marker"* ]]; then
+    printf '%s\n' "$out"
+    err "Could not execute ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}. Output above."
+  fi
+
+  local phprc
+  phprc="$(sed -n "s/.*${marker}RC\([0-9][0-9]*\).*/\1/p" <<<"$out" | tail -1)"
+  printf '%s\n' "$out" | grep -vF "$marker" || true
+
+  if [[ -z "$phprc" ]]; then
+    if [[ "$out" == *"container is not initialized"* ]]; then
+      err "Drupal did not bootstrap on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ for --uri=${DRUSH_URI}}.
        drush ran, but no site was booted, so ${script} could not touch config.
        This is what happens on a multisite when no --uri is passed.
        If ${ACQUIA_APP} is a multisite (Site Factory included), declare the
@@ -330,16 +345,11 @@ drush_php() {
          ./srsx-migrate init        # answer 'y' to the multisite question
          ./srsx-migrate ${SRSX_CURRENT_PHASE:-server} --force
        Current SITES: ${SITES:-(none — treated as single-site)}"
-      fi
-      err "${script} stopped part-way on ${ACQUIA_APP}.${EFFECTIVE_ENV} (PHP fatal). Output above."
     fi
-    (( phprc == 0 )) || err "${script} reported failure (code ${phprc}) on ${ACQUIA_APP}.${EFFECTIVE_ENV}. Output above."
-    return 0
-  done
-
-  err "Could not execute ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}.
-       The remote 'drush php:eval' never reported back. Last output:
-${out}"
+    err "${script} stopped part-way on ${ACQUIA_APP}.${EFFECTIVE_ENV} (PHP fatal). Output above."
+  fi
+  (( phprc == 0 )) || err "${script} reported failure (code ${phprc}) on ${ACQUIA_APP}.${EFFECTIVE_ENV}. Output above."
+  return 0
 }
 
 # drush_cr — rebuild caches without letting a broken container abort the run.
@@ -1551,6 +1561,21 @@ EOF
 
   _ensure_tools_gitignore
 
+  # Let the operator pin drupal/searchstax. Empty means "whatever composer
+  # resolves as latest", which is what you want unless a release is known bad.
+  if [[ -z "${SEARCHSTAX_MODULE_VERSION+x}" ]]; then
+    ask "drupal/searchstax version (e.g. 1.12.0 or ^1.11; Enter for the latest)" \
+        SEARCHSTAX_MODULE_VERSION ""
+    _save_env_var SEARCHSTAX_MODULE_VERSION "$SEARCHSTAX_MODULE_VERSION"
+  fi
+  local ssx_require="drupal/searchstax"
+  if [[ -n "${SEARCHSTAX_MODULE_VERSION:-}" ]]; then
+    ssx_require="drupal/searchstax:${SEARCHSTAX_MODULE_VERSION}"
+    info "Pinning ${ssx_require}"
+  else
+    info "Installing the latest drupal/searchstax release."
+  fi
+
   local -a install_pkgs=(
     drupal/search_api
     drupal/search_api_solr
@@ -1561,7 +1586,7 @@ EOF
   composer_in_repo_capture require --no-interaction --no-progress \
     drupal/search_api:^1 \
     drupal/search_api_solr:^4 \
-    drupal/searchstax:^1.11 \
+    "$ssx_require" \
     drupal/key:^1 || composer_rc=$?
 
   # Verify the result and report per-package status (installed / updated /

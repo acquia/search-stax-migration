@@ -34,6 +34,7 @@ EOF
 : > "$SRSX_DEMO_HOME/state/init.done"
 
 # Answer order (init already seeded, so it is skipped):
+#   searchstax version: (empty = latest)
 #   install branch: main
 #   topology count: 2   (min=1, n=3 → custom assignment path)
 #   assign a=1, b=1, c=2
@@ -41,7 +42,7 @@ EOF
 #   app2 creds: endpoint, read, write, analytics-url, analytics-key
 #   analytics-key storage: 1 (Key module)
 A_LOG=/tmp/srsx-topology-a.log
-DEMO_ANSWERS="main,2,1,1,2,https://app1.example.searchstax.com,r1,w1,https://an1.example.searchstax.com,k1,https://app2.example.searchstax.com,r2,w2,https://an2.example.searchstax.com,k2,1" \
+DEMO_ANSWERS=",main,2,1,1,2,https://app1.example.searchstax.com,r1,w1,https://an1.example.searchstax.com,k1,https://app2.example.searchstax.com,r2,w2,https://an2.example.searchstax.com,k2,1" \
     ./srsx-migrate --demo all </dev/null >"$A_LOG" 2>&1 \
     || fail "scenario A run exited non-zero" "$A_LOG"
 
