@@ -61,26 +61,30 @@ YML="$SRSX_DEMO_HOME/artifacts/server-searchstax_server.yml"
 # host must be a BARE hostname — never the full URL.
 grep -q "^    host: 'searchcloud-29-us-east-1.searchstax.com'$" "$YML" \
     || { echo "FAIL: host not decomposed to a bare hostname"; grep -n "host:" "$YML"; exit 1; }
+# The SearchStax connector keeps path at '/', with the account id in 'context'.
+grep -q "^  connector: searchstax$"                   "$YML" || fail "connector is not 'searchstax'" "$LOG"
 grep -q "^    scheme: 'https'$"                       "$YML" || fail "scheme not substituted" "$LOG"
 grep -q "^    port: 443$"                             "$YML" || fail "port not substituted" "$LOG"
-grep -q "^    path: '/29847'$"                        "$YML" || fail "path not decomposed" "$LOG"
+grep -q "^    path: '/'$"                             "$YML" || fail "path must stay '/' for this connector" "$LOG"
 grep -q "^    core: 'abdx18743001dev02-13912'$"       "$YML" || fail "core not decomposed" "$LOG"
-
-# The Solr request handler must never leak into the config.
-grep -q "update" "$YML" && fail "trailing /update handler leaked into server config" "$LOG"
+grep -q "^    context: '29847'$"                      "$YML" || fail "context not decomposed" "$LOG"
+grep -q "^    key_id: ''$"                            "$YML" || fail "key_id must be empty (do not use Key module)" "$LOG"
+# The connector is configured from the full update endpoint, handler included.
+grep -q "update_endpoint: 'https://searchcloud-29-us-east-1.searchstax.com/29847/abdx18743001dev02-13912/update'" "$YML" \
+    || { echo "FAIL: update_endpoint not written in full"; grep -n "update_endpoint" "$YML"; exit 1; }
 
 # Operator must see the decomposition (and the override hint) during configure.
-grep -q "Solr connector: scheme=https host=searchcloud-29-us-east-1.searchstax.com" "$LOG" \
-    || fail "configure did not print the Solr connector decomposition" "$LOG"
-grep -q "SEARCHSTAX_SOLR_PATH_1" "$LOG" \
-    || fail "configure did not print the path/core override hint" "$LOG"
+grep -q "SearchStax connector: host=searchcloud-29-us-east-1.searchstax.com context=29847" "$LOG" \
+    || fail "configure did not print the SearchStax connector decomposition" "$LOG"
+grep -q "SEARCHSTAX_SOLR_CORE_1" "$LOG" \
+    || fail "configure did not print the core/context override hint" "$LOG"
 
-echo "  endpoint decomposition (update handler stripped) OK"
+echo "  endpoint decomposition (host/context/core + update endpoint) OK"
 
 # ---------------------------------------------------------------------------
 # 3. Each php-eval script must be invoked on the environment.
 # ---------------------------------------------------------------------------
-for s in import-config-yaml.php switch-view-index.php create-key-entity.php; do
+for s in create-server.php switch-view-index.php create-key-entity.php; do
     grep -q "php:script ${s}" "$LOG" || fail "expected php:script invocation for ${s}" "$LOG"
 done
 

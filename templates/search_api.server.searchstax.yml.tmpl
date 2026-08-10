@@ -8,13 +8,18 @@ name: '@@NAME@@'
 description: 'SearchStax-backed Solr server. Created by srsx-migrate.'
 backend: search_api_solr
 backend_config:
-  connector: standard
+  connector: searchstax
   connector_config:
-    scheme: '@@SCHEME@@'
+    scheme: 'https'
     host: '@@HOST@@'
     port: @@PORT@@
-    path: '@@PATH@@'
+    path: '/'
     core: '@@CORE@@'
+    context: '@@CONTEXT@@'
+    update_endpoint: '@@UPDATE_ENDPOINT@@'
+    update_token: '(not written to this record)'
+    autosuggest_endpoint: ''
+    key_id: ''
     timeout: 5
     index_timeout: 5
     optimize_timeout: 10

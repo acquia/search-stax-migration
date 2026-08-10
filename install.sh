@@ -47,6 +47,7 @@ FILES=(
   "lib/searchstax_api.sh"
   "lib/php-eval/clone-index.php"
   "lib/php-eval/create-key-entity.php"
+  "lib/php-eval/create-server.php"
   "lib/php-eval/import-config-yaml.php"
   "lib/php-eval/inspect-service-class.php"
   "lib/php-eval/switch-view-index.php"

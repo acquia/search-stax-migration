@@ -3,6 +3,9 @@ artifacts/
 logs/
 state/
 migration.env
+
+# Local reference copy of drupal/searchstax, used to verify connector details.
+searchstax-1.x/
 migration.env.bak*
 *.log
 

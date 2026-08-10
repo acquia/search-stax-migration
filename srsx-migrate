@@ -1131,53 +1131,40 @@ _ssx_site_prefix() {
   printf '%s_' "$slug"
 }
 
-# Decompose a SearchStax Solr endpoint URL into the five connector_config
-# fields search_api_solr expects. `host` must be a bare hostname, so a pasted
-# URL like
-#   https://searchcloud-29-us-east-1.searchstax.com/29847/appname-13912/update
-# becomes scheme=https host=searchcloud-… port=443 path=/29847 core=appname-13912.
-# The trailing Solr request handler is dropped: search_api_solr appends
-# /select and /update itself, so either form may be pasted.
-# Sets SRSX_EP_SCHEME / _HOST / _PORT / _PATH / _CORE.
+# Decompose a SearchStax Solr endpoint into what the module's connector stores.
+# It parses the update endpoint with
+#   @https://([^/:]+)/([^/]+)/([^/]+)/(update|select)$@   → host, context, core
+# so path stays '/' and the account id is a separate 'context', not part of the
+# path. Either handler may be pasted; the stored endpoint always ends /update.
+# Sets SRSX_EP_SCHEME / _HOST / _PORT / _PATH / _CORE / _CONTEXT / _UPDATE.
 _ssx_parse_endpoint() {
-  local url="$1" scheme rest hostport host port path core
+  local url="$1" rest hostport host port path
 
-  scheme="${url%%://*}"
-  if [[ "$scheme" == "$url" ]]; then
-    scheme="https"; rest="$url"
-  else
-    rest="${url#*://}"
-  fi
-  scheme="$(printf '%s' "$scheme" | tr '[:upper:]' '[:lower:]')"
-
+  rest="${url#*://}"
   hostport="${rest%%/*}"
   if [[ "$hostport" == "$rest" ]]; then path=""; else path="/${rest#*/}"; fi
 
   host="${hostport%%:*}"
   port="${hostport#*:}"
-  if [[ "$port" == "$hostport" ]]; then
-    if [[ "$scheme" == "https" ]]; then port=443; else port=80; fi
-  fi
+  [[ "$port" == "$hostport" ]] && port=443
 
+  # Drop the Solr request handler and any trailing slash.
   path="${path%/}"
   case "${path##*/}" in
-    select|update|admin) path="${path%/*}"; path="${path%/}" ;;
+    select|update|admin) path="${path%/*}" ;;
   esac
+  path="${path%/}"
 
-  # The last remaining segment is the Solr core; anything before it is the path.
-  if [[ "$path" == *"/"* ]]; then
-    core="${path##*/}"
-    path="${path%/*}"
-  else
-    core=""
-  fi
-  [[ -z "$path" ]] && path="/"
+  local core="" context=""
+  core="${path##*/}"
+  local head="${path%/*}"
+  context="${head##*/}"
 
-  SRSX_EP_SCHEME="$scheme"
   SRSX_EP_HOST="$host"
   SRSX_EP_PORT="$port"
-  SRSX_EP_PATH="$path"
   SRSX_EP_CORE="$core"
+  SRSX_EP_CONTEXT="$context"
+  SRSX_EP_UPDATE="https://${host}/${context}/${core}/update"
 }
 
 # Resolve a per-app SearchStax value with single-app fallback.
@@ -1191,6 +1178,15 @@ ssx_app_field() {
     val="${!var:-}"
   fi
   printf '%s' "$val"
+}
+
+# The SearchStax connector stores a single "Read & write token key". The write
+# token is that value; fall back to the read token if only that was captured.
+_ssx_update_token() {
+  local k="$1" tok
+  tok="$(ssx_app_field "$k" WRITE_TOKEN)"
+  [[ -z "$tok" ]] && tok="$(ssx_app_field "$k" READ_TOKEN)"
+  printf '%s' "$tok"
 }
 
 # True when every app (1..SEARCHSTAX_APP_COUNT) already has an endpoint.
@@ -1910,8 +1906,10 @@ _configure_one_app() {
   ak="$(ssx_app_field "$k" ANALYTICS_KEY)"
 
   [[ -z "$ep" ]] && ask "SearchStax App endpoint URL (paste the Solr URL; a trailing /select or /update is fine)" ep
-  [[ -z "$rt" ]] && ask_secret "SearchStax read token" rt
-  [[ -z "$wt" ]] && ask_secret "SearchStax write token" wt
+  # Shown, not hidden: these end up in Drupal config anyway, and pasting them
+  # blind is how the wrong token gets in without anyone noticing.
+  [[ -z "$rt" ]] && ask "SearchStax read token" rt
+  [[ -z "$wt" ]] && ask "SearchStax write token" wt
   [[ -z "$au" ]] && ask "SearchStax analytics URL (or press Enter to skip)" au ""
   if [[ -z "$ak" && -n "$au" ]]; then
     ask_secret "SearchStax analytics key" ak
@@ -1922,8 +1920,9 @@ _configure_one_app() {
   # obvious now rather than at 'server' time.
   if [[ -n "$ep" ]]; then
     _ssx_parse_endpoint "$ep"
-    dim "  Solr connector: scheme=${SRSX_EP_SCHEME} host=${SRSX_EP_HOST} port=${SRSX_EP_PORT} path=${SRSX_EP_PATH} core=${SRSX_EP_CORE}"
-    dim "  (override in migration.env with SEARCHSTAX_SOLR_PATH_${k} / SEARCHSTAX_SOLR_CORE_${k} if this is wrong)"
+    dim "  SearchStax connector: host=${SRSX_EP_HOST} context=${SRSX_EP_CONTEXT} core=${SRSX_EP_CORE}"
+    dim "  Update endpoint: ${SRSX_EP_UPDATE}"
+    dim "  (override in migration.env with SEARCHSTAX_SOLR_CORE_${k} / SEARCHSTAX_SOLR_CONTEXT_${k} if this is wrong)"
   fi
   # Analytics key is per-app too; persist it suffixed (and mirror app 1).
   if [[ -n "$ak" ]]; then
@@ -1992,31 +1991,40 @@ _phase_server_site() {
   [[ -n "$endpoint" ]] || \
     err "No endpoint for app ${ai}${DRUSH_URI:+ (site ${DRUSH_URI})}. Run 'srsx-migrate configure'."
 
-  # search_api_solr wants the endpoint split into scheme/host/port/path/core.
-  # SEARCHSTAX_SOLR_PATH[_k] / SEARCHSTAX_SOLR_CORE[_k] in migration.env win,
+  # search_api_solr wants the endpoint split into scheme/host/port/path/core;
+  # the SearchStax connector adds a 'context' and keeps the full update URL.
+  # SEARCHSTAX_SOLR_CORE[_k] / SEARCHSTAX_SOLR_CONTEXT[_k] in migration.env win,
   # so an unusual endpoint layout can be corrected without a code change.
   _ssx_parse_endpoint "$endpoint"
-  local ep_path ep_core
-  ep_path="$(ssx_app_field "$ai" SOLR_PATH)"; ep_path="${ep_path:-$SRSX_EP_PATH}"
+  local ep_core ep_context
   ep_core="$(ssx_app_field "$ai" SOLR_CORE)"; ep_core="${ep_core:-$SRSX_EP_CORE}"
+  ep_context="$(ssx_app_field "$ai" SOLR_CONTEXT)"; ep_context="${ep_context:-$SRSX_EP_CONTEXT}"
 
   local out="${ARTIFACTS_DIR}/server-${server_id}.yml"
   mkdir -p "$ARTIFACTS_DIR"
-  # Minimal template substitution.
+  # Written as a readable record of what was applied; the server itself is
+  # created through the API so the SearchStax connector can be selected.
   sed -e "s|@@ID@@|${server_id}|g" \
       -e "s|@@NAME@@|SearchStax Cloud|g" \
-      -e "s|@@SCHEME@@|${SRSX_EP_SCHEME}|g" \
       -e "s|@@HOST@@|${SRSX_EP_HOST}|g" \
       -e "s|@@PORT@@|${SRSX_EP_PORT}|g" \
-      -e "s|@@PATH@@|${ep_path}|g" \
       -e "s|@@CORE@@|${ep_core}|g" \
+      -e "s|@@CONTEXT@@|${ep_context}|g" \
+      -e "s|@@UPDATE_ENDPOINT@@|${SRSX_EP_UPDATE}|g" \
       "$tmpl" > "$out"
 
-  info "Importing server config from ${out}"
-  # php:eval (not php:script) — see drush_php for why.
-  drush_php import-config-yaml.php \
-    "SRSX_YAML_CONTENT=$(cat "$out")" \
-    "SRSX_CONFIG_NAME=search_api.server.${server_id}"
+  info "Creating server '${server_id}' (record: ${out})"
+  drush_php create-server.php \
+    "SRSX_SERVER_ID=${server_id}" \
+    "SRSX_SERVER_NAME=SearchStax Cloud" \
+    "SRSX_HOST=${SRSX_EP_HOST}" \
+    "SRSX_PORT=${SRSX_EP_PORT}" \
+    "SRSX_CORE=${ep_core}" \
+    "SRSX_CONTEXT=${ep_context}" \
+    "SRSX_UPDATE_ENDPOINT=${SRSX_EP_UPDATE}" \
+    "SRSX_UPDATE_TOKEN=$(_ssx_update_token "$ai")" \
+    "SRSX_AUTOSUGGEST_ENDPOINT=$(ssx_app_field "$ai" AUTOSUGGEST_ENDPOINT)" \
+    "SRSX_CONNECTOR=${SEARCHSTAX_CONNECTOR:-}"
 
   drush_cr
   # Verify

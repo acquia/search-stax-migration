@@ -59,6 +59,7 @@ case "$sub" in
       *clone-index.php)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
       *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
+      *create-server.php)      echo "[create-server] connector: searchstax_token_auth (demo)."; echo "[create-server] Saved search_api.server.searchstax_server (demo)." ;;
       *import-config-yaml.php) echo "[import-config-yaml] Imported (demo)." ;;
       *create-key-entity.php)  echo "[create-key-entity] Saved (demo)." ;;
       *)                       echo "[php:script] Ran ${f} (demo)." ;;
