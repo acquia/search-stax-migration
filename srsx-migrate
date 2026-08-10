@@ -839,7 +839,7 @@ phase_done_mark() {
 # Print phase completion summary with elapsed time.
 phase_footer() {
   local phase="$1"
-  local end_time="$(date +%s)"
+  local end_time; end_time="$(date +%s)"
   local elapsed=$((end_time - PHASE_START_TIME))
   local mins=$((elapsed / 60))
   local secs=$((elapsed % 60))
@@ -1144,10 +1144,10 @@ ensure_site_app_topology() {
           [[ "$a" =~ ^[0-9]+$ ]] && (( a >= 1 && a <= count )) && break
           warn "Enter a number between 1 and ${count}."
         done
-        assign[$i]="$a"
+        assign[i]="$a"
       done
       local -a per=() ok_valid=1 j
-      for a in "${assign[@]}"; do per[$a]=$(( ${per[$a]:-0} + 1 )); done
+      for a in "${assign[@]}"; do per[a]=$(( ${per[a]:-0} + 1 )); done
       for (( j = 1; j <= count; j++ )); do
         local c=${per[$j]:-0}
         if (( c < 1 )); then

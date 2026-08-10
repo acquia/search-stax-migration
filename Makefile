@@ -10,7 +10,7 @@ SHELL := /usr/bin/env bash
 help:
 	@echo "Targets:"
 	@echo "  lint        - bash -n + shellcheck on all shell scripts"
-	@echo "  check       - lint + verify config keys against searchstax.schema.yml fixture"
+	@echo "  check       - lint + verify config keys and the install.sh file manifest"
 	@echo "  test        - run --demo end-to-end with scripted answers (smoke test)"
 	@echo "  demo        - launch interactive demo mode in this terminal"
 	@echo "  demo-cast   - regenerate docs/_assets/demo.cast (asciinema)"
@@ -34,6 +34,7 @@ lint:
 
 check: lint
 	@bash tests/check-config-keys.sh
+	@bash tests/check-install-manifest.sh
 
 test:
 	@rm -rf state/ artifacts/ logs/ /tmp/srsx-demo-home-mtest
@@ -47,6 +48,8 @@ test:
 	@bash tests/test-ssx-json-body.sh
 	@bash tests/test-provision-skip-when-endpoint-set.sh
 	@bash tests/test-provision-demo-skip.sh
+	@bash tests/test-multisite-app-topology.sh
+	@bash tests/test-remote-php-and-endpoint.sh
 
 demo:
 	@./srsx-migrate --demo

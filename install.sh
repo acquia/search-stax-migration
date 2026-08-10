@@ -40,17 +40,22 @@ AUTH_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 TARGET=""
 DOCS_URL="https://docs.acquia.com/acquia-cloud-platform/migrating-acquia-search-powered-searchstax"
 
-# The set of files the installer downloads. Keep aligned with the repo layout.
+# The set of files the installer downloads. Keep aligned with the repo layout —
+# tests/check-install-manifest.sh fails the build if this drifts.
 FILES=(
   "srsx-migrate"
   "lib/searchstax_api.sh"
   "lib/php-eval/clone-index.php"
+  "lib/php-eval/create-key-entity.php"
+  "lib/php-eval/import-config-yaml.php"
   "lib/php-eval/switch-view-index.php"
   "lib/php-eval/set-multisite-prefix.php"
   "lib/demo/bin/drush"
   "lib/demo/bin/composer"
   "lib/demo/bin/acli"
+  "lib/demo/bin/curl"
   "lib/demo/bin/git"
+  "lib/demo/bin/jq"
   "lib/demo/fixtures/drush-status.json"
   "lib/demo/fixtures/drush-sapi-s.json"
   "lib/demo/fixtures/drush-sapi-i.json"
