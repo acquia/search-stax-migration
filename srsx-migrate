@@ -349,6 +349,7 @@ ${out}"
 # loudly, but it must not strand the migration half-way through: the config
 # changes around it are already saved and the remaining phases still apply.
 SRSX_CR_FAILED=0
+SRSX_CR_PROBED=0
 drush_cr() {
   local out="" rc=0
   local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} cr"
@@ -359,17 +360,38 @@ drush_cr() {
   SRSX_CR_FAILED=1
   warn "Cache rebuild failed${DRUSH_URI:+ on ${DRUSH_URI}} — continuing with the migration."
   if [[ "$out" == *"must implement interface"* && "$out" == *"EventSubscriberInterface"* ]]; then
-    local svc
+    local svc class
     svc="$(sed -n 's/.*Service "\([^"]*\)" must implement.*/\1/p' <<<"$out" | head -1)"
-    warn "  A module registers ${svc:-a service} as an event subscriber, but its class
-       does not implement EventSubscriberInterface, so Drupal cannot compile its
-       service container. This is a module-side defect, not a migration step.
-       Until it is fixed the site keeps serving its previously built container,
-       so your config changes will not take effect on the front end.
-       Fix it before you deploy: update or patch the module that provides
-       ${svc:-that service}, then re-run:  ./srsx-migrate ${SRSX_CURRENT_PHASE:-server} --force"
+    warn "  Drupal decides this by reflecting on the class it loaded, so the class
+       actually in memory does not implement EventSubscriberInterface. In the
+       searchstax module every recent release does implement it, so this is
+       normally stale or mismatched code on the environment rather than a bug
+       in the module: an old opcache copy, a second copy of the module, or code
+       that has not been redeployed. Until the container compiles, the site
+       keeps serving its previously built container, so your config changes
+       will not take effect on the front end."
+    # Ask the environment which file it actually loaded — that separates a stale
+    # opcache from genuinely old deployed code.
+    if [[ "$DEMO" == "0" && "$DRY_RUN" == "0" ]] && (( SRSX_CR_PROBED == 0 )); then
+      SRSX_CR_PROBED=1
+      class="$(_ssx_service_class "$svc")"
+      info "Inspecting ${class} on ${ACQUIA_APP}.${EFFECTIVE_ENV}…"
+      drush_php inspect-service-class.php "SRSX_CLASS=${class}" || \
+        warn "  Could not inspect ${class}; check the module code on the environment by hand."
+    fi
   fi
   return 0
+}
+
+# Best-effort service id → class name for the searchstax services we know about.
+_ssx_service_class() {
+  case "$1" in
+    searchstax.flood_subscriber)               printf 'Drupal\\searchstax\\EventSubscriber\\FloodSubscriber' ;;
+    searchstax.solr_error_detection_subscriber) printf 'Drupal\\searchstax\\EventSubscriber\\SolrErrorDetectionSubscriber' ;;
+    searchstax.solr_event_subscriber)          printf 'Drupal\\searchstax\\EventSubscriber\\SearchSubscriber' ;;
+    searchstax.solr_request_event_subscriber)  printf 'Drupal\\searchstax\\EventSubscriber\\SolrRequestBypassSubscriber' ;;
+    *)                                         printf '%s' "$1" ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -2425,9 +2447,10 @@ srsx_cr_reminder() {
   printf '\n'
   warn "One or more cache rebuilds failed during this run."
   warn "  Drupal is still serving its previously compiled service container, so the
-       migrated search config will NOT be live until 'drush cr' succeeds.
-       Fix the module that broke container compilation (see the error above),
-       then run:  acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- cr"
+       migrated search config will NOT be live until 'drush cr' succeeds, and a
+       deploy to another environment will fail there too — a container that
+       cannot compile means the site cannot boot. Resolve it before deploying.
+       Retry with:  acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- cr"
 }
 
 dispatch() {

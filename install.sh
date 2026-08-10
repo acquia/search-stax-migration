@@ -48,6 +48,7 @@ FILES=(
   "lib/php-eval/clone-index.php"
   "lib/php-eval/create-key-entity.php"
   "lib/php-eval/import-config-yaml.php"
+  "lib/php-eval/inspect-service-class.php"
   "lib/php-eval/switch-view-index.php"
   "lib/php-eval/set-multisite-prefix.php"
   "lib/demo/bin/drush"

@@ -42,15 +42,18 @@ EOF
 chmod +x "$W/acli"
 
 sed -n '/^drush_cr()/,/^}/p' srsx-migrate > "$W/fn.sh"
+sed -n '/^_ssx_service_class()/,/^}/p' srsx-migrate >> "$W/fn.sh"
 [[ -s "$W/fn.sh" ]] || fail "could not extract drush_cr() from srsx-migrate"
 
 OUT="$W/out.log"
 PATH="$W:$PATH" bash -c '
 set -euo pipefail
-SRSX_CR_FAILED=0
+SRSX_CR_FAILED=0; SRSX_CR_PROBED=0; DEMO=0; DRY_RUN=0
 warn(){ printf "[WARN] %s\n" "$*"; }
+info(){ printf "%s\n" "$*"; }
 audit(){ :; }
 drush(){ acli remote:drush x -- "$@"; }
+drush_php(){ printf "PROBE %s\n" "$*"; }
 ACQUIA_APP=demoapp; EFFECTIVE_ENV=dev; DRUSH_URI=""; SRSX_CURRENT_PHASE=server
 source "$1/fn.sh"
 drush_cr
@@ -61,13 +64,15 @@ echo "FLAG=$SRSX_CR_FAILED"
 grep -q "^RC=0$"   "$OUT" || fail "drush_cr did not return 0 after a failed rebuild" "$OUT"
 grep -q "^FLAG=1$" "$OUT" || fail "drush_cr did not record the failure" "$OUT"
 grep -q "Cache rebuild failed" "$OUT" || fail "no warning was printed" "$OUT"
-# The operator needs the offending service name, not just a generic message.
-grep -q "searchstax.flood_subscriber" "$OUT" \
-    || fail "the failing service name was not surfaced" "$OUT"
 grep -q "will not take effect" "$OUT" \
     || fail "consequences of a stale container were not explained" "$OUT"
 
-echo "  failed rebuild warns loudly and continues OK"
+# The interface error means the LOADED class is wrong, so the run must probe the
+# environment rather than blame the module's source.
+grep -q "PROBE inspect-service-class.php SRSX_CLASS=Drupal\\\\searchstax\\\\EventSubscriber\\\\FloodSubscriber" "$OUT" \
+    || fail "the failing service class was not inspected on the environment" "$OUT"
+
+echo "  failed rebuild warns, probes the environment, and continues OK"
 
 # A successful rebuild must stay silent about failure and leave the flag clear.
 cat > "$W/acli" <<'EOF'
@@ -77,10 +82,12 @@ EOF
 chmod +x "$W/acli"
 PATH="$W:$PATH" bash -c '
 set -euo pipefail
-SRSX_CR_FAILED=0
+SRSX_CR_FAILED=0; SRSX_CR_PROBED=0; DEMO=0; DRY_RUN=0
 warn(){ printf "[WARN] %s\n" "$*"; }
+info(){ printf "%s\n" "$*"; }
 audit(){ :; }
 drush(){ acli remote:drush x -- "$@"; }
+drush_php(){ printf "PROBE %s\n" "$*"; }
 ACQUIA_APP=demoapp; EFFECTIVE_ENV=dev; DRUSH_URI=""; SRSX_CURRENT_PHASE=server
 source "$1/fn.sh"
 drush_cr
