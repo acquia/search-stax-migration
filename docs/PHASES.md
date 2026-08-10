@@ -43,8 +43,10 @@ That's the entire phase. Acquia takes nightly backups already; this just adds an
 Creates the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. **Optional** — short-circuits cleanly when any of these is true:
 
 - `--demo` mode is active (the toolkit never touches the network in demo)
-- `SEARCHSTAX_APP_ENDPOINT` is already set in `migration.env` or the environment (e.g. your TAM already provisioned an app)
+- Every app endpoint is already set in `migration.env` or the environment (e.g. your TAM already provisioned the app[s])
 - You answer "no, I already have one" at the first prompt
+
+For a multisite, the number of apps to create comes from the site→app topology (subject to the 9-sites-per-app cap) — see [MAPPING.md → Multisite → SearchStax apps](MAPPING.md#multisite--searchstax-apps).
 
 Otherwise the flow is:
 
@@ -52,28 +54,29 @@ Otherwise the flow is:
 POST  /api/rest/v2/obtain-auth-token/            (login; cached in state/searchstax.session, chmod 600)
 GET   /api/rest/v2/account/                       (account picker)
 GET   /api/rest/experience-manager/v1/plan_regions?account=…   (region picker)
-POST  /api/rest/experience-manager/v2/apps?account=…           (create — one per Drupal site)
-GET   /api/rest/experience-manager/v2/apps/<id>?account=…      (capture endpoint + tokens)
+POST  /api/rest/experience-manager/v2/apps?account=…           (create — one per app group)
+   GET   /api/rest/experience-manager/v2/apps/<id>?account=…      (capture endpoint + tokens)
 ```
 
-The first app's endpoint URL is written to `migration.env` as `SEARCHSTAX_APP_ENDPOINT`; tokens (read/write/analytics) are exported in-process so the next `configure` phase consumes them without re-prompting. Per the configure-phase contract, **tokens are never persisted to disk**.
+Every created app's endpoint URL **and** tokens (read/write/analytics) are persisted to `migration.env`, suffixed `_1.._K` per app; app 1 also mirrors the unsuffixed `SEARCHSTAX_*` vars. `migration.env` is git-ignored, so these secrets are never committed, and multi-app runs can resume across separate invocations.
 
-Resumability: the created app id is recorded to `state/provisioned-app-id` *before* the detail-fetch, so a crash between create and detail re-uses the existing app instead of creating a duplicate on the next run.
+Resumability: each created app id is recorded to `state/provisioned-app-id-<k>` *before* the detail-fetch, so a crash between create and detail re-uses the existing app instead of creating a duplicate on the next run.
 
 > **Reverse-engineered.** Endpoints + body shapes were inferred from the SearchStudio SPA. The Drupal `searchstax` module does not expose app creation. If the API rev changes shape, `phase_provision` falls back to prompting the operator for the endpoint manually — same UX as before this phase existed.
 
 ## `configure`
 
-Interactive only. Asks for:
+Interactive only. For **each** SearchStax app (one for single-site; K for a multisite, labeled with the sites it serves) asks for:
 
 - SearchStax app endpoint URL (e.g. `https://ss123-…-aws.searchstax.com`)
 - SearchStax read token (input hidden)
 - SearchStax write token (input hidden)
 - SearchStax analytics URL (optional)
 - SearchStax analytics key (input hidden, optional)
-- Storage choice for the analytics key: **Key module entity** (default, per Acquia docs) or plain config
 
-Non-secret values are written back to `migration.env` (with `awk`, no `sed -i` portability traps). Secrets are kept in memory for the rest of the run.
+Then a single storage choice for the analytics key: **Key module entity** (default, per Acquia docs) or plain config.
+
+Values are written back to `migration.env` (with `awk`, no `sed -i` portability traps), suffixed `_1.._K` per app. Because `migration.env` is git-ignored, tokens are persisted there too so per-app credentials survive a resume. The site→app topology is captured here if `provision` didn't already establish it.
 
 ## `server`
 

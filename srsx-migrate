@@ -89,6 +89,10 @@ readonly -a PHASE_ORDER=(
 # environments through your normal Acquia workflow.
 readonly -a PROD_ENV_NAMES=(prod production live www main master)
 
+# SearchStax caps a single Site Search app at this many Drupal sites. The
+# minimum number of apps a multisite needs is therefore ceil(N / 9).
+readonly MAX_SITES_PER_APP=9
+
 # =============================================================================
 # GLOBAL FLAGS / STATE
 # =============================================================================
@@ -831,6 +835,7 @@ clear_progress_state() {
   rm -f "${STATE_DIR}/last-phase" \
         "${STATE_DIR}/module-installed" \
         "${STATE_DIR}/provisioned-app-id"
+  rm -f "${STATE_DIR}"/provisioned-app-id-* 2>/dev/null || true
 }
 
 # Print "already complete" notice and return 0 (skip).
@@ -923,6 +928,189 @@ for_each_site() {
     "$fn"
   done
   DRUSH_URI=""
+}
+
+# ---------------------------------------------------------------------------
+# SITE → SEARCHSTAX-APP TOPOLOGY
+#
+# A multisite can spread its sites across one or more SearchStax apps, subject
+# to the 9-sites-per-app cap. The mapping is captured once (by whichever of
+# provision/configure runs first) and persisted to migration.env as:
+#   SEARCHSTAX_APP_COUNT   number of apps (K)
+#   SITE_APP_MAP           "uri1=1,uri2=1,uri3=2,..." (site → 1-based app index)
+# Per-app credentials are stored suffixed _1.._K; app 1 also mirrors the
+# unsuffixed SEARCHSTAX_* vars for single-site backward compatibility.
+# ---------------------------------------------------------------------------
+
+# Integer ceiling division: _ceil_div <numerator> <denominator>.
+_ceil_div() { printf '%s' $(( ($1 + $2 - 1) / $2 )); }
+
+# Echo the 1-based app index a site maps to (default 1 when unmapped/single).
+_site_app_index() {
+  local uri="$1"
+  if [[ -n "${SITE_APP_MAP:-}" && -n "$uri" ]]; then
+    local pair
+    IFS=',' read -r -a _sam_pairs <<< "$SITE_APP_MAP"
+    for pair in "${_sam_pairs[@]}"; do
+      if [[ "${pair%%=*}" == "$uri" ]]; then
+        printf '%s' "${pair##*=}"
+        return 0
+      fi
+    done
+  fi
+  printf '1'
+}
+
+# Echo a comma-separated list of the sites mapped to app <k>.
+_sites_for_app() {
+  local k="$1" out="" s
+  for s in "${SITES_ARR[@]}"; do
+    [[ "$(_site_app_index "$s")" == "$k" ]] && out+="${out:+, }${s}"
+  done
+  printf '%s' "$out"
+}
+
+# Derive a stable Solr index_prefix slug from a site --uri. Strips scheme,
+# keeps [A-Za-z0-9_], and appends '_' as a namespace separator.
+_ssx_site_prefix() {
+  local uri="$1"
+  local host="${uri#*://}"; host="${host%%/*}"
+  local slug; slug="$(printf '%s' "$host" | tr -c 'A-Za-z0-9_' '_')"
+  slug="${slug%_}"
+  printf '%s_' "$slug"
+}
+
+# Resolve a per-app SearchStax value with single-app fallback.
+# ssx_app_field <k> <FIELD>  (FIELD e.g. APP_ENDPOINT, READ_TOKEN).
+ssx_app_field() {
+  local k="$1" field="$2" var val
+  var="SEARCHSTAX_${field}_${k}"
+  val="${!var:-}"
+  if [[ -z "$val" && "$k" == "1" ]]; then
+    var="SEARCHSTAX_${field}"
+    val="${!var:-}"
+  fi
+  printf '%s' "$val"
+}
+
+# True when every app (1..SEARCHSTAX_APP_COUNT) already has an endpoint.
+_all_app_endpoints_set() {
+  local k count="${SEARCHSTAX_APP_COUNT:-1}"
+  for (( k = 1; k <= count; k++ )); do
+    [[ -n "$(ssx_app_field "$k" APP_ENDPOINT)" ]] || return 1
+  done
+  return 0
+}
+
+# Determine SEARCHSTAX_APP_COUNT + SITE_APP_MAP for the current sites.
+# Single-site → exactly one app, no questions. Idempotent: once persisted it
+# returns immediately, so provision and configure never both ask.
+ensure_site_app_topology() {
+  if (( ${#SITES_ARR[@]} == 0 )); then
+    SEARCHSTAX_APP_COUNT=1
+    return 0
+  fi
+  if [[ -n "${SEARCHSTAX_APP_COUNT:-}" && -n "${SITE_APP_MAP:-}" ]]; then
+    return 0
+  fi
+
+  local n=${#SITES_ARR[@]}
+  local min_apps; min_apps="$(_ceil_div "$n" "$MAX_SITES_PER_APP")"
+
+  printf '\n'
+  info "SearchStax allows a maximum of ${MAX_SITES_PER_APP} sites per app."
+  info "You are migrating ${n} site(s), so you need at least ${min_apps} app(s)."
+  info "  • The default packs sites into the fewest apps (up to ${MAX_SITES_PER_APP} per app)."
+  info "  • Choose more apps only if a customer wants finer separation."
+
+  local count
+  while :; do
+    ask "How many SearchStax apps for these ${n} site(s)?" count "$min_apps"
+    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+      warn "Enter a whole number."; continue
+    fi
+    if (( count < min_apps )); then
+      warn "At least ${min_apps} app(s) required (max ${MAX_SITES_PER_APP} sites per app)."; continue
+    fi
+    if (( count > n )); then
+      warn "Cannot exceed the number of sites (${n})."; continue
+    fi
+    break
+  done
+
+  local map="" i idx
+  if (( count == min_apps )); then
+    # Default: pack sequentially, up to MAX_SITES_PER_APP sites per app.
+    for i in "${!SITES_ARR[@]}"; do
+      idx=$(( i / MAX_SITES_PER_APP + 1 ))
+      map+="${SITES_ARR[$i]}=${idx},"
+    done
+  elif (( count == n )); then
+    # One app per site.
+    for i in "${!SITES_ARR[@]}"; do
+      map+="${SITES_ARR[$i]}=$((i + 1)),"
+    done
+  else
+    # Custom grouping: assign each site, then validate the partition.
+    local -a assign
+    while :; do
+      assign=()
+      local a
+      for i in "${!SITES_ARR[@]}"; do
+        while :; do
+          ask "Which app (1-${count}) should '${SITES_ARR[$i]}' use?" a "1"
+          [[ "$a" =~ ^[0-9]+$ ]] && (( a >= 1 && a <= count )) && break
+          warn "Enter a number between 1 and ${count}."
+        done
+        assign[$i]="$a"
+      done
+      local -a per=() ok_valid=1 j
+      for a in "${assign[@]}"; do per[$a]=$(( ${per[$a]:-0} + 1 )); done
+      for (( j = 1; j <= count; j++ )); do
+        local c=${per[$j]:-0}
+        if (( c < 1 )); then
+          warn "App ${j} has no sites — every app must have at least one."; ok_valid=0
+        elif (( c > MAX_SITES_PER_APP )); then
+          warn "App ${j} has ${c} sites (max ${MAX_SITES_PER_APP})."; ok_valid=0
+        fi
+      done
+      (( ok_valid )) && break
+      info "Let's redo the assignment."
+    done
+    for i in "${!SITES_ARR[@]}"; do
+      map+="${SITES_ARR[$i]}=${assign[$i]},"
+    done
+  fi
+  map="${map%,}"
+
+  SEARCHSTAX_APP_COUNT="$count"
+  SITE_APP_MAP="$map"
+  _save_env_var SEARCHSTAX_APP_COUNT "$count"
+  _save_env_var SITE_APP_MAP "$map"
+  ok "App topology: ${count} app(s) for ${n} site(s)."
+}
+
+# Persist one app's credentials (suffixed _k) and export them for this run.
+# migration.env is gitignored, so secrets are safe to store here and this is
+# what makes multi-app resume work across separate invocations.
+_persist_app_creds() {
+  local k="$1" endpoint="$2" rtok="$3" wtok="$4" aurl="$5"
+  [[ -n "$endpoint" ]] && _save_env_var "SEARCHSTAX_APP_ENDPOINT_${k}" "$endpoint"
+  [[ -n "$aurl"     ]] && _save_env_var "SEARCHSTAX_ANALYTICS_URL_${k}" "$aurl"
+  [[ -n "$rtok"     ]] && _save_env_var "SEARCHSTAX_READ_TOKEN_${k}"   "$rtok"
+  [[ -n "$wtok"     ]] && _save_env_var "SEARCHSTAX_WRITE_TOKEN_${k}"  "$wtok"
+  export "SEARCHSTAX_APP_ENDPOINT_${k}=${endpoint}"
+  export "SEARCHSTAX_READ_TOKEN_${k}=${rtok}"
+  export "SEARCHSTAX_WRITE_TOKEN_${k}=${wtok}"
+  export "SEARCHSTAX_ANALYTICS_URL_${k}=${aurl}"
+  # App 1 mirrors the unsuffixed vars so single-app references keep working.
+  if [[ "$k" == "1" ]]; then
+    [[ -n "$endpoint" ]] && { _save_env_var SEARCHSTAX_APP_ENDPOINT "$endpoint"; export SEARCHSTAX_APP_ENDPOINT="$endpoint"; }
+    [[ -n "$aurl"     ]] && { _save_env_var SEARCHSTAX_ANALYTICS_URL "$aurl"; export SEARCHSTAX_ANALYTICS_URL="$aurl"; }
+    [[ -n "$rtok"     ]] && export SEARCHSTAX_READ_TOKEN="$rtok"
+    [[ -n "$wtok"     ]] && export SEARCHSTAX_WRITE_TOKEN="$wtok"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1297,17 +1485,18 @@ EOF
 # provisioned by their TAM. The phase short-circuits cleanly in three cases:
 #
 #   1. --demo mode             — never touch the network.
-#   2. SEARCHSTAX_APP_ENDPOINT  already set in migration.env / env.
+#   2. All app endpoints        already set in migration.env / env.
 #   3. Operator answers "no, I already have one" at the first prompt.
 #
 # Otherwise it logs into SearchStax (cached session in state/searchstax.session
 # to avoid burning a fresh 2FA TOTP on retries), picks account/env/region,
-# derives one default app name per Drupal site, and POSTs to
-# /experience-manager/v2/apps. On success it GETs /apps/<id>, extracts the
-# Solr endpoint URL + read/write tokens, and saves the endpoint to
-# migration.env so phase_configure can pick it up without another prompt.
+# and creates one app per app-group determined by ensure_site_app_topology
+# (subject to the 9-sites-per-app cap), POSTing to /experience-manager/v2/apps.
+# For each app it GETs /apps/<id>, extracts the Solr endpoint URL + read/write
+# tokens, and persists them suffixed _1.._K to migration.env (gitignored) so
+# phase_configure and the per-site phases can pick them up.
 #
-# Resumability: the created app id is recorded to state/provisioned-app-id
+# Resumability: each created app id is recorded to state/provisioned-app-id-<k>
 # *before* the detail-fetch, so a crash between POST and GET re-uses the
 # existing app instead of creating a duplicate on the next run.
 phase_provision() {
@@ -1322,15 +1511,19 @@ phase_provision() {
     return 0
   fi
 
-  # 2. Endpoint already configured (previous run, TAM-provisioned app, or a
+  # 2. Establish how many apps this (multi)site needs before deciding whether
+  #    provisioning is required. Single-site → one app, no questions.
+  ensure_site_app_topology
+
+  # 3. Endpoint(s) already configured (previous run, TAM-provisioned app, or a
   #    standalone create-apps invocation by the operator).
-  if [[ -n "${SEARCHSTAX_APP_ENDPOINT:-}" ]]; then
-    ok "App endpoint already configured (${SEARCHSTAX_APP_ENDPOINT}). Skipping provisioning."
+  if _all_app_endpoints_set; then
+    ok "App endpoint already configured. Skipping provisioning."
     phase_done_mark provision
     return 0
   fi
 
-  # 3. Let the operator opt out.
+  # 4. Let the operator opt out.
   local choice
   ask_choice "Do you want srsx-migrate to create a SearchStax app for you?" choice \
     "yes — create one (or more) apps via the SearchStax REST API" \
@@ -1352,14 +1545,14 @@ phase_provision() {
   ssx_pick_environment
   ssx_pick_region
 
-  # Derive one default app name per site (or one total for single-site).
+  # One default app name per app (group). Single-app installs get one name.
   local -a default_names=()
-  if (( ${#SITES_ARR[@]} == 0 )); then
+  local k
+  if (( ${SEARCHSTAX_APP_COUNT:-1} <= 1 )); then
     default_names+=("$(_ssx_default_app_name "")")
   else
-    local s
-    for s in "${SITES_ARR[@]}"; do
-      default_names+=("$(_ssx_default_app_name "$s")")
+    for (( k = 1; k <= SEARCHSTAX_APP_COUNT; k++ )); do
+      default_names+=("$(_ssx_group_app_name "$k")")
     done
   fi
 
@@ -1381,48 +1574,32 @@ phase_provision() {
   for n in "${app_names[@]}"; do dim "  • $n"; done
   confirm "Proceed?"
 
-  # Resume support: re-use a previously-created-but-not-fully-captured app.
-  local resumed_id
-  resumed_id="$(state_get provisioned-app-id)"
-
-  local created_endpoint=""
-  local app_id
-  for n in "${app_names[@]}"; do
-    app_id=""
-    if [[ -n "$resumed_id" ]]; then
-      info "Resuming app id '$resumed_id' (created by a previous run)."
-      app_id="$resumed_id"
-      resumed_id=""
+  local app_id state_key
+  for (( k = 1; k <= ${#app_names[@]}; k++ )); do
+    n="${app_names[$((k - 1))]}"
+    state_key="provisioned-app-id-${k}"
+    # Resume support: re-use an app created but not fully captured last run.
+    app_id="$(state_get "$state_key")"
+    if [[ -n "$app_id" ]]; then
+      info "Resuming app '${n}' id '${app_id}' (created by a previous run)."
     else
       ssx_create_one_app "$n" || err "Failed to create app '$n'. Aborting."
       app_id="$ssx_last_app_id"
-      [[ -n "$app_id" ]] && state_set provisioned-app-id "$app_id"
+      [[ -n "$app_id" ]] && state_set "$state_key" "$app_id"
     fi
 
-    # First created app's endpoint is what srsx-migrate writes to
-    # migration.env. Additional per-site apps are still created; their
-    # endpoints would be wired in by per-site config (out of scope for v1).
-    if [[ -z "$created_endpoint" ]] && [[ -n "$app_id" ]] && ssx_get_app_detail "$app_id"; then
-      created_endpoint="$ssx_last_endpoint"
-      _save_env_var SEARCHSTAX_APP_ENDPOINT "$created_endpoint"
-      [[ -n "$ssx_last_analytics_url" ]] && _save_env_var SEARCHSTAX_ANALYTICS_URL "$ssx_last_analytics_url"
-      # Pass tokens through env to phase_configure (in-memory only;
-      # NEVER written to migration.env per the configure-phase contract).
-      export SEARCHSTAX_APP_ENDPOINT="$created_endpoint"
-      [[ -n "$ssx_last_read_token"    ]] && export SEARCHSTAX_READ_TOKEN="$ssx_last_read_token"
-      [[ -n "$ssx_last_write_token"   ]] && export SEARCHSTAX_WRITE_TOKEN="$ssx_last_write_token"
-      [[ -n "$ssx_last_analytics_url" ]] && export SEARCHSTAX_ANALYTICS_URL="$ssx_last_analytics_url"
-      ok "Captured endpoint: $created_endpoint"
+    if [[ -n "$app_id" ]] && ssx_get_app_detail "$app_id"; then
+      _persist_app_creds "$k" "$ssx_last_endpoint" "$ssx_last_read_token" \
+        "$ssx_last_write_token" "$ssx_last_analytics_url"
+      ok "App ${k}/${#app_names[@]} '${n}' endpoint: ${ssx_last_endpoint}"
+    else
+      warn "App '${n}' created, but its endpoint URL could not be auto-extracted."
+      warn "  Look it up in SearchStudio → Settings → Search & Indexing,"
+      warn "  then paste it when 'configure' prompts you for app ${k}."
     fi
 
-    rm -f "${STATE_DIR}/provisioned-app-id"
+    rm -f "${STATE_DIR}/${state_key}"
   done
-
-  if [[ -z "$created_endpoint" ]] && [[ "${DRY_RUN:-0}" == "0" ]]; then
-    warn "App(s) created, but the endpoint URL could not be auto-extracted."
-    warn "  Look it up in SearchStudio → Settings → Search & Indexing,"
-    warn "  then paste it when 'configure' prompts you."
-  fi
 
   phase_done_mark provision
 }
@@ -1447,6 +1624,23 @@ _ssx_default_app_name() {
   printf '%s\n' "$clean"
 }
 
+# Default app name for app group <k>. Uses the sole site's URI when the group
+# has exactly one site, otherwise base_env_appK.
+_ssx_group_app_name() {
+  local k="$1"
+  local -a members=()
+  local s
+  for s in "${SITES_ARR[@]}"; do
+    [[ "$(_site_app_index "$s")" == "$k" ]] && members+=("$s")
+  done
+  if (( ${#members[@]} == 1 )); then
+    _ssx_default_app_name "${members[0]}"
+    return 0
+  fi
+  local raw="${ACQUIA_APP:-app}_${ACQUIA_TARGET_ENV:-dev}_app${k}"
+  printf '%s\n' "$(printf '%s' "$raw" | tr -c 'A-Za-z0-9_' '_')"
+}
+
 # =============================================================================
 # PHASE E — Configure: prompt for SearchStax credentials
 # =============================================================================
@@ -1455,6 +1649,8 @@ phase_configure() {
   header "configure" "${PHASE_DESC[configure]}"
   if phase_done_check configure; then phase_skip_done configure; return 0; fi
   guard_against_prod
+
+  ensure_site_app_topology
 
   cat <<EOF
 Where to find SearchStax credentials:
@@ -1466,21 +1662,10 @@ automates app creation via the SearchStax REST API and pre-populates the
 endpoint + tokens this phase would otherwise prompt for.
 EOF
 
-  if [[ -z "${SEARCHSTAX_APP_ENDPOINT:-}" ]]; then
-    ask "SearchStax App endpoint URL (https://...)" SEARCHSTAX_APP_ENDPOINT
-  fi
-  if [[ -z "${SEARCHSTAX_READ_TOKEN:-}" ]]; then
-    ask_secret "SearchStax read token" SEARCHSTAX_READ_TOKEN
-  fi
-  if [[ -z "${SEARCHSTAX_WRITE_TOKEN:-}" ]]; then
-    ask_secret "SearchStax write token" SEARCHSTAX_WRITE_TOKEN
-  fi
-  if [[ -z "${SEARCHSTAX_ANALYTICS_URL:-}" ]]; then
-    ask "SearchStax analytics URL (or press Enter to skip)" SEARCHSTAX_ANALYTICS_URL ""
-  fi
-  if [[ -z "${SEARCHSTAX_ANALYTICS_KEY:-}" && -n "$SEARCHSTAX_ANALYTICS_URL" ]]; then
-    ask_secret "SearchStax analytics key" SEARCHSTAX_ANALYTICS_KEY
-  fi
+  local count="${SEARCHSTAX_APP_COUNT:-1}" k
+  for (( k = 1; k <= count; k++ )); do
+    _configure_one_app "$k" "$count"
+  done
 
   if [[ -z "${SECRET_STORAGE:-}" ]]; then
     ask_choice "How should the analytics key be stored?" SECRET_STORAGE \
@@ -1488,14 +1673,43 @@ EOF
       "plain (write to searchstax.settings.analytics_key directly)"
     SECRET_STORAGE="${SECRET_STORAGE%% *}"
   fi
-
-  # Persist non-secret config back to migration.env (without overwriting user comments).
-  _save_env_var SEARCHSTAX_APP_ENDPOINT "$SEARCHSTAX_APP_ENDPOINT"
-  _save_env_var SEARCHSTAX_ANALYTICS_URL "$SEARCHSTAX_ANALYTICS_URL"
   _save_env_var SECRET_STORAGE "$SECRET_STORAGE"
 
-  ok "Credentials captured (secrets held in-memory only — not written to migration.env)."
+  ok "Credentials captured for ${count} app(s) (stored in gitignored migration.env)."
   phase_done_mark configure
+}
+
+# Prompt for (or reuse) one app's credentials and persist them suffixed _k.
+_configure_one_app() {
+  local k="$1" count="$2"
+  if (( count > 1 )); then
+    printf '\n'
+    info "── App ${k} of ${count} — sites: $(_sites_for_app "$k") ──"
+  fi
+
+  local ep rt wt au ak
+  ep="$(ssx_app_field "$k" APP_ENDPOINT)"
+  rt="$(ssx_app_field "$k" READ_TOKEN)"
+  wt="$(ssx_app_field "$k" WRITE_TOKEN)"
+  au="$(ssx_app_field "$k" ANALYTICS_URL)"
+  ak="$(ssx_app_field "$k" ANALYTICS_KEY)"
+
+  [[ -z "$ep" ]] && ask "SearchStax App endpoint URL (https://...)" ep
+  [[ -z "$rt" ]] && ask_secret "SearchStax read token" rt
+  [[ -z "$wt" ]] && ask_secret "SearchStax write token" wt
+  [[ -z "$au" ]] && ask "SearchStax analytics URL (or press Enter to skip)" au ""
+  if [[ -z "$ak" && -n "$au" ]]; then
+    ask_secret "SearchStax analytics key" ak
+  fi
+
+  _persist_app_creds "$k" "$ep" "$rt" "$wt" "$au"
+  # Analytics key is per-app too; persist it suffixed (and mirror app 1).
+  if [[ -n "$ak" ]]; then
+    _save_env_var "SEARCHSTAX_ANALYTICS_KEY_${k}" "$ak"
+    export "SEARCHSTAX_ANALYTICS_KEY_${k}=${ak}"
+    if [[ "$k" == "1" ]]; then export SEARCHSTAX_ANALYTICS_KEY="$ak"; fi
+  fi
+  return 0
 }
 
 # Preserve secrets in-memory only; only non-secret values are persisted.
@@ -1537,8 +1751,8 @@ phase_server() {
   if phase_done_check server; then phase_skip_done server; return 0; fi
   guard_against_prod
 
-  [[ -n "${SEARCHSTAX_APP_ENDPOINT:-}" ]] || \
-    err "SEARCHSTAX_APP_ENDPOINT is empty. Run 'srsx-migrate configure' first."
+  _all_app_endpoints_set || \
+    err "No SearchStax app endpoint configured. Run 'srsx-migrate configure' first."
 
   for_each_site _phase_server_site
   phase_done_mark server
@@ -1549,12 +1763,19 @@ _phase_server_site() {
   local tmpl="${SCRIPT_DIR}/templates/search_api.server.searchstax.yml.tmpl"
   [[ -f "$tmpl" ]] || err "Server template missing: $tmpl"
 
+  # Resolve the SearchStax app this site routes to.
+  local ai endpoint
+  ai="$(_site_app_index "$DRUSH_URI")"
+  endpoint="$(ssx_app_field "$ai" APP_ENDPOINT)"
+  [[ -n "$endpoint" ]] || \
+    err "No endpoint for app ${ai}${DRUSH_URI:+ (site ${DRUSH_URI})}. Run 'srsx-migrate configure'."
+
   local out="${ARTIFACTS_DIR}/server-${server_id}.yml"
   mkdir -p "$ARTIFACTS_DIR"
   # Minimal template substitution.
   sed -e "s|@@ID@@|${server_id}|g" \
       -e "s|@@NAME@@|SearchStax Cloud|g" \
-      -e "s|@@ENDPOINT@@|${SEARCHSTAX_APP_ENDPOINT}|g" \
+      -e "s|@@ENDPOINT@@|${endpoint}|g" \
       "$tmpl" > "$out"
 
   info "Importing server config from ${out}"
@@ -1614,6 +1835,16 @@ _phase_index_site() {
     audit "drush php:script lib/php-eval/clone-index.php  # for each legacy index"
   fi
 
+  # Multisite: namespace each site's documents with a per-site index_prefix so
+  # sites sharing one SearchStax app can filter to "this site only". Harmless
+  # when a site has its own app.
+  if (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]; then
+    local prefix; prefix="$(_ssx_site_prefix "$DRUSH_URI")"
+    info "Setting index_prefix '${prefix}' for ${DRUSH_URI}"
+    SRSX_PREFIX="$prefix" \
+      drush php:script "${SCRIPT_DIR}/lib/php-eval/set-multisite-prefix.php"
+  fi
+
   drush cr
 
   # Reindex the new copies.
@@ -1669,25 +1900,31 @@ phase_route() {
 }
 
 _phase_route_site() {
+  # Resolve the SearchStax app this site routes to.
+  local ai analytics_url analytics_key
+  ai="$(_site_app_index "$DRUSH_URI")"
+  analytics_url="$(ssx_app_field "$ai" ANALYTICS_URL)"
+  analytics_key="$(ssx_app_field "$ai" ANALYTICS_KEY)"
+
   # Verified config keys from searchstax.schema.yml.
   drush cset -y searchstax.settings searches_via_searchstudio 1
   drush cset -y searchstax.settings configure_via_searchstudio 0
 
-  if [[ -n "${SEARCHSTAX_ANALYTICS_URL:-}" ]]; then
-    drush cset -y searchstax.settings analytics_url "${SEARCHSTAX_ANALYTICS_URL}"
+  if [[ -n "$analytics_url" ]]; then
+    drush cset -y searchstax.settings analytics_url "${analytics_url}"
   fi
 
-  if [[ -n "${SEARCHSTAX_ANALYTICS_KEY:-}" ]]; then
+  if [[ -n "$analytics_key" ]]; then
     case "${SECRET_STORAGE:-key}" in
       key)
         info "Storing analytics key as a Key module entity"
-        SRSX_KEY_VALUE="${SEARCHSTAX_ANALYTICS_KEY}" \
+        SRSX_KEY_VALUE="${analytics_key}" \
           drush php:script "${SCRIPT_DIR}/lib/php-eval/create-key-entity.php"
         drush cset -y searchstax.settings key_id "searchstax_analytics_key"
         ;;
       plain)
         warn "Storing analytics key as plain config (NOT recommended for prod)"
-        drush cset -y searchstax.settings analytics_key "${SEARCHSTAX_ANALYTICS_KEY}"
+        drush cset -y searchstax.settings analytics_key "${analytics_key}"
         ;;
       *)
         err "Unknown SECRET_STORAGE: ${SECRET_STORAGE}"
@@ -1809,6 +2046,23 @@ phase_handoff() {
   ( cd "$REPO_ROOT" && run git add composer.json composer.lock 2>/dev/null || true )
   ( cd "$REPO_ROOT" && run git add "$config_dir" )
   ( cd "$REPO_ROOT" && run git status --short )
+
+  # Multisite caveat: `drush cex` above exported only the default site's config.
+  # Each additional site keeps its own config (separate DB + config_sync_directory)
+  # and must be exported per --uri before deploy. Automating this is a planned
+  # follow-up; for now we surface explicit manual steps.
+  if (( ${#SITES_ARR[@]} > 0 )); then
+    warn "Multisite detected: the export above covered only the default site."
+    info "  Export each remaining site's config into its own config sync directory:"
+    local s
+    for s in "${SITES_ARR[@]}"; do
+      [[ -z "$s" || "$s" == "default" ]] && continue
+      info "    acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- --uri=${s} config:export -y"
+      info "      → pull that site's YAML into its config_sync_directory, then git add it."
+    done
+    info "  (Each site's search_api.server/index + views config must be committed"
+    info "   for its SearchStax app to take effect after deploy.)"
+  fi
 
   cat <<EOF
 
