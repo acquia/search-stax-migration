@@ -205,8 +205,10 @@ audit() {
 # =============================================================================
 
 # run <args...> — print + execute; under --dry-run, only print.
+# SRSX_AUDIT_OVERRIDE replaces the echoed command for calls whose real
+# argv is too large to be readable (e.g. an inlined php:eval body).
 run() {
-  audit "$*"
+  audit "${SRSX_AUDIT_OVERRIDE:-$*}"
   if [[ "$DRY_RUN" == "1" ]]; then
     return 0
   fi
@@ -251,6 +253,37 @@ drush_capture() {
   [[ -n "$DRUSH_URI" ]] && cmd+=(--uri="$DRUSH_URI")
   cmd+=("$@")
   run_capture "$var" "${cmd[@]}"
+}
+
+# drush_php <script.php> [KEY=VALUE ...] — run one of lib/php-eval/*.php on the
+# REMOTE environment.
+#
+# `drush php:script` cannot be used here: drush executes on the Acquia server,
+# but the toolkit lives in a gitignored tools/ directory that is never deployed,
+# so the file does not exist remotely — and SRSX_* variables set locally do not
+# survive the SSH hop, so getenv() would come back empty anyway. Instead we send
+# the script body as a php:eval argument (arguments do cross the boundary) with
+# putenv() calls prepended, which keeps each script's existing getenv() reads
+# working unchanged. Values are base64-encoded so quotes/newlines are safe.
+drush_php() {
+  local script="$1"; shift
+  local file="${SCRIPT_DIR}/lib/php-eval/${script}"
+  [[ -f "$file" ]] || err "php-eval script missing: ${file}"
+
+  # Marker line lets the demo drush shim tell which script is running.
+  local code="// srsx-script: ${script}"$'\n'
+  local kv key val b64
+  for kv in "$@"; do
+    key="${kv%%=*}"; val="${kv#*=}"
+    b64="$(printf '%s' "$val" | base64 | tr -d '\n')"
+    code+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
+  done
+  # Drop the opening <?php tag; php:eval evaluates a raw PHP body.
+  code+="$(tail -n +2 "$file")"
+
+  info "Running ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ (${DRUSH_URI})}"
+  SRSX_AUDIT_OVERRIDE="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>" \
+    drush php:eval "$code"
 }
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1013,55 @@ _ssx_site_prefix() {
   printf '%s_' "$slug"
 }
 
+# Decompose a SearchStax Solr endpoint URL into the five connector_config
+# fields search_api_solr expects. `host` must be a bare hostname, so a pasted
+# URL like
+#   https://searchcloud-29-us-east-1.searchstax.com/29847/appname-13912/update
+# becomes scheme=https host=searchcloud-… port=443 path=/29847 core=appname-13912.
+# The trailing Solr request handler is dropped: search_api_solr appends
+# /select and /update itself, so either form may be pasted.
+# Sets SRSX_EP_SCHEME / _HOST / _PORT / _PATH / _CORE.
+_ssx_parse_endpoint() {
+  local url="$1" scheme rest hostport host port path core
+
+  scheme="${url%%://*}"
+  if [[ "$scheme" == "$url" ]]; then
+    scheme="https"; rest="$url"
+  else
+    rest="${url#*://}"
+  fi
+  scheme="$(printf '%s' "$scheme" | tr '[:upper:]' '[:lower:]')"
+
+  hostport="${rest%%/*}"
+  if [[ "$hostport" == "$rest" ]]; then path=""; else path="/${rest#*/}"; fi
+
+  host="${hostport%%:*}"
+  port="${hostport#*:}"
+  if [[ "$port" == "$hostport" ]]; then
+    if [[ "$scheme" == "https" ]]; then port=443; else port=80; fi
+  fi
+
+  path="${path%/}"
+  case "${path##*/}" in
+    select|update|admin) path="${path%/*}"; path="${path%/}" ;;
+  esac
+
+  # The last remaining segment is the Solr core; anything before it is the path.
+  if [[ "$path" == *"/"* ]]; then
+    core="${path##*/}"
+    path="${path%/*}"
+  else
+    core=""
+  fi
+  [[ -z "$path" ]] && path="/"
+
+  SRSX_EP_SCHEME="$scheme"
+  SRSX_EP_HOST="$host"
+  SRSX_EP_PORT="$port"
+  SRSX_EP_PATH="$path"
+  SRSX_EP_CORE="$core"
+}
+
 # Resolve a per-app SearchStax value with single-app fallback.
 # ssx_app_field <k> <FIELD>  (FIELD e.g. APP_ENDPOINT, READ_TOKEN).
 ssx_app_field() {
@@ -1694,7 +1776,7 @@ _configure_one_app() {
   au="$(ssx_app_field "$k" ANALYTICS_URL)"
   ak="$(ssx_app_field "$k" ANALYTICS_KEY)"
 
-  [[ -z "$ep" ]] && ask "SearchStax App endpoint URL (https://...)" ep
+  [[ -z "$ep" ]] && ask "SearchStax App endpoint URL (paste the Solr URL; a trailing /select or /update is fine)" ep
   [[ -z "$rt" ]] && ask_secret "SearchStax read token" rt
   [[ -z "$wt" ]] && ask_secret "SearchStax write token" wt
   [[ -z "$au" ]] && ask "SearchStax analytics URL (or press Enter to skip)" au ""
@@ -1703,6 +1785,13 @@ _configure_one_app() {
   fi
 
   _persist_app_creds "$k" "$ep" "$rt" "$wt" "$au"
+  # Show how the endpoint will be split for search_api_solr so a wrong paste is
+  # obvious now rather than at 'server' time.
+  if [[ -n "$ep" ]]; then
+    _ssx_parse_endpoint "$ep"
+    dim "  Solr connector: scheme=${SRSX_EP_SCHEME} host=${SRSX_EP_HOST} port=${SRSX_EP_PORT} path=${SRSX_EP_PATH} core=${SRSX_EP_CORE}"
+    dim "  (override in migration.env with SEARCHSTAX_SOLR_PATH_${k} / SEARCHSTAX_SOLR_CORE_${k} if this is wrong)"
+  fi
   # Analytics key is per-app too; persist it suffixed (and mirror app 1).
   if [[ -n "$ak" ]]; then
     _save_env_var "SEARCHSTAX_ANALYTICS_KEY_${k}" "$ak"
@@ -1770,18 +1859,31 @@ _phase_server_site() {
   [[ -n "$endpoint" ]] || \
     err "No endpoint for app ${ai}${DRUSH_URI:+ (site ${DRUSH_URI})}. Run 'srsx-migrate configure'."
 
+  # search_api_solr wants the endpoint split into scheme/host/port/path/core.
+  # SEARCHSTAX_SOLR_PATH[_k] / SEARCHSTAX_SOLR_CORE[_k] in migration.env win,
+  # so an unusual endpoint layout can be corrected without a code change.
+  _ssx_parse_endpoint "$endpoint"
+  local ep_path ep_core
+  ep_path="$(ssx_app_field "$ai" SOLR_PATH)"; ep_path="${ep_path:-$SRSX_EP_PATH}"
+  ep_core="$(ssx_app_field "$ai" SOLR_CORE)"; ep_core="${ep_core:-$SRSX_EP_CORE}"
+
   local out="${ARTIFACTS_DIR}/server-${server_id}.yml"
   mkdir -p "$ARTIFACTS_DIR"
   # Minimal template substitution.
   sed -e "s|@@ID@@|${server_id}|g" \
       -e "s|@@NAME@@|SearchStax Cloud|g" \
-      -e "s|@@ENDPOINT@@|${endpoint}|g" \
+      -e "s|@@SCHEME@@|${SRSX_EP_SCHEME}|g" \
+      -e "s|@@HOST@@|${SRSX_EP_HOST}|g" \
+      -e "s|@@PORT@@|${SRSX_EP_PORT}|g" \
+      -e "s|@@PATH@@|${ep_path}|g" \
+      -e "s|@@CORE@@|${ep_core}|g" \
       "$tmpl" > "$out"
 
   info "Importing server config from ${out}"
-  # Use config:import via php:script because `drush cset` cannot create whole entities.
-  SRSX_YAML_FILE="$out" SRSX_CONFIG_NAME="search_api.server.${server_id}" \
-    drush php:script "${SCRIPT_DIR}/lib/php-eval/import-config-yaml.php"
+  # php:eval (not php:script) — see drush_php for why.
+  drush_php import-config-yaml.php \
+    "SRSX_YAML_CONTENT=$(cat "$out")" \
+    "SRSX_CONFIG_NAME=search_api.server.${server_id}"
 
   drush cr
   # Verify
@@ -1828,11 +1930,12 @@ _phase_index_site() {
     fi
     while IFS= read -r idx; do
       info "Cloning index: ${idx}"
-      SRSX_INDEX_ID="$idx" SRSX_NEW_SERVER_ID="${SRSX_NEW_SERVER_ID:-searchstax_server}" \
-        drush php:script "${SCRIPT_DIR}/lib/php-eval/clone-index.php"
+      drush_php clone-index.php \
+        "SRSX_INDEX_ID=${idx}" \
+        "SRSX_NEW_SERVER_ID=${SRSX_NEW_SERVER_ID:-searchstax_server}"
     done <<< "$legacy_ids"
   else
-    audit "drush php:script lib/php-eval/clone-index.php  # for each legacy index"
+    audit "drush php:eval <clone-index.php>  # for each legacy index"
   fi
 
   # Multisite: namespace each site's documents with a per-site index_prefix so
@@ -1841,8 +1944,7 @@ _phase_index_site() {
   if (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]; then
     local prefix; prefix="$(_ssx_site_prefix "$DRUSH_URI")"
     info "Setting index_prefix '${prefix}' for ${DRUSH_URI}"
-    SRSX_PREFIX="$prefix" \
-      drush php:script "${SCRIPT_DIR}/lib/php-eval/set-multisite-prefix.php"
+    drush_php set-multisite-prefix.php "SRSX_PREFIX=${prefix}"
   fi
 
   drush cr
@@ -1882,7 +1984,7 @@ phase_views() {
 }
 
 _phase_views_site() {
-  drush php:script "${SCRIPT_DIR}/lib/php-eval/switch-view-index.php"
+  drush_php switch-view-index.php
   drush cr
   ok "Views switched to SearchStax-backed indexes."
 }
@@ -1918,8 +2020,7 @@ _phase_route_site() {
     case "${SECRET_STORAGE:-key}" in
       key)
         info "Storing analytics key as a Key module entity"
-        SRSX_KEY_VALUE="${analytics_key}" \
-          drush php:script "${SCRIPT_DIR}/lib/php-eval/create-key-entity.php"
+        drush_php create-key-entity.php "SRSX_KEY_VALUE=${analytics_key}"
         drush cset -y searchstax.settings key_id "searchstax_analytics_key"
         ;;
       plain)

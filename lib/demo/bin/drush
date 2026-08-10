@@ -64,7 +64,19 @@ case "$sub" in
       *)                       echo "[php:script] Ran ${f} (demo)." ;;
     esac
     ;;
-  php:eval|php-eval)                      echo "[php:eval] (demo)." ;;
+  php:eval|php-eval)
+    # srsx-migrate inlines lib/php-eval/*.php as a php:eval body prefixed with
+    # a "// srsx-script: <name>" marker; dispatch on that.
+    code="${args[1]:-}"
+    case "$code" in
+      *"srsx-script: clone-index.php"*)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
+      *"srsx-script: switch-view-index.php"*)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
+      *"srsx-script: set-multisite-prefix.php"*) echo "[set-multisite-prefix] OK (demo)." ;;
+      *"srsx-script: import-config-yaml.php"*) echo "[import-config-yaml] Imported (demo)." ;;
+      *"srsx-script: create-key-entity.php"*)  echo "[create-key-entity] Saved (demo)." ;;
+      *)                                       echo "[php:eval] (demo)." ;;
+    esac
+    ;;
   key-add)                                echo "Key added (demo)." ;;
   *)                                      echo "(demo drush) ${sub} ${args[*]:1}" ;;
 esac

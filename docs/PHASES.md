@@ -68,7 +68,7 @@ Resumability: each created app id is recorded to `state/provisioned-app-id-<k>` 
 
 Interactive only. For **each** SearchStax app (one for single-site; K for a multisite, labeled with the sites it serves) asks for:
 
-- SearchStax app endpoint URL (e.g. `https://ss123-…-aws.searchstax.com`)
+- SearchStax app endpoint URL — paste the Solr URL; a trailing `/select` or `/update` is fine
 - SearchStax read token (input hidden)
 - SearchStax write token (input hidden)
 - SearchStax analytics URL (optional)
@@ -76,14 +76,29 @@ Interactive only. For **each** SearchStax app (one for single-site; K for a mult
 
 Then a single storage choice for the analytics key: **Key module entity** (default, per Acquia docs) or plain config.
 
+### Endpoint decomposition
+
+`search_api_solr` does not take a URL — it wants `scheme` / `host` / `port` / `path` / `core` separately, where `host` is a **bare hostname**. The endpoint you paste is therefore split automatically, and `/select` or `/update` (Solr request handlers, which `search_api_solr` appends itself) are stripped:
+
+```
+https://searchcloud-29-us-east-1.searchstax.com/29847/appname-13912/update
+  scheme https
+  host   searchcloud-29-us-east-1.searchstax.com
+  port   443
+  path   /29847
+  core   appname-13912
+```
+
+The split is printed during `configure` so a bad paste is obvious immediately. If your app's URL layout differs, override it in `migration.env` with `SEARCHSTAX_SOLR_PATH[_k]` / `SEARCHSTAX_SOLR_CORE[_k]` — no code change needed.
+
 Values are written back to `migration.env` (with `awk`, no `sed -i` portability traps), suffixed `_1.._K` per app. Because `migration.env` is git-ignored, tokens are persisted there too so per-app credentials survive a resume. The site→app topology is captured here if `provision` didn't already establish it.
 
 ## `server`
 
-Renders [`templates/search_api.server.searchstax.yml.tmpl`](../templates/search_api.server.searchstax.yml.tmpl) with `sed` substitution of `@@ID@@`, `@@NAME@@`, `@@ENDPOINT@@`. Then:
+Renders [`templates/search_api.server.searchstax.yml.tmpl`](../templates/search_api.server.searchstax.yml.tmpl) with `sed` substitution of `@@ID@@`, `@@NAME@@`, and the decomposed endpoint (`@@SCHEME@@`, `@@HOST@@`, `@@PORT@@`, `@@PATH@@`, `@@CORE@@`). Then:
 
 ```bash
-drush php:script lib/php-eval/import-config-yaml.php   # SRSX_YAML_FILE=…  SRSX_CONFIG_NAME=search_api.server.<id>
+drush php:eval <import-config-yaml.php>   # SRSX_YAML_CONTENT=…  SRSX_CONFIG_NAME=search_api.server.<id>
 drush cr
 drush config:get search_api.server.<id> --format=json  # verify
 ```
@@ -95,7 +110,7 @@ If verification fails, prints the manual UI fallback URL and pauses.
 For each Search-API index whose `server` is **not** `searchstax*`:
 
 ```bash
-SRSX_INDEX_ID=<id> SRSX_NEW_SERVER_ID=<server> drush php:script lib/php-eval/clone-index.php
+SRSX_INDEX_ID=<id> SRSX_NEW_SERVER_ID=<server> drush php:eval <clone-index.php>
 ```
 
 The PHP helper calls `\Drupal::service('solr_to_searchstax_ss_migration.utility')->cloneIndex($index, $server)` — the same code path the module's UI form uses. Falls back to `Index::createDuplicate()` if the service isn't present.
@@ -111,7 +126,7 @@ drush sapi-i <new>     # index
 ## `views`
 
 ```bash
-drush php:script lib/php-eval/switch-view-index.php
+drush php:eval <switch-view-index.php>
 drush cr
 ```
 
@@ -124,7 +139,7 @@ drush cset -y searchstax.settings searches_via_searchstudio 1
 drush cset -y searchstax.settings configure_via_searchstudio 0
 drush cset -y searchstax.settings analytics_url <url>          # if provided
 # Then, depending on SECRET_STORAGE:
-#   key   →  drush php:script create-key-entity.php; drush cset key_id searchstax_analytics_key
+#   key   →  drush php:eval <create-key-entity.php>; drush cset key_id searchstax_analytics_key
 #   plain →  drush cset searchstax.settings analytics_key <value>
 drush cr
 ```

@@ -10,11 +10,11 @@ backend: search_api_solr
 backend_config:
   connector: standard
   connector_config:
-    scheme: https
-    host: '@@ENDPOINT@@'
-    port: 443
-    path: /
-    core: ''
+    scheme: '@@SCHEME@@'
+    host: '@@HOST@@'
+    port: @@PORT@@
+    path: '@@PATH@@'
+    core: '@@CORE@@'
     timeout: 5
     index_timeout: 5
     optimize_timeout: 10

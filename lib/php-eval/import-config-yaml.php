@@ -2,33 +2,37 @@
 
 /**
  * @file
- * Import a single rendered YAML file into Drupal active config.
+ * Import a rendered YAML config object into Drupal active config.
  *
- * Invoked via:
- *   SRSX_YAML_FILE=<path> SRSX_CONFIG_NAME=<name> \
- *     drush php:script lib/php-eval/import-config-yaml.php
+ * Invoked via srsx-migrate's drush_php helper, which sends this body to
+ * `drush php:eval` on the remote environment with SRSX_* set via putenv():
+ *   SRSX_YAML_CONTENT  the rendered YAML itself (the toolkit is not deployed
+ *                      to the remote host, so a local path is unreadable there)
+ *   SRSX_CONFIG_NAME   e.g. search_api.server.searchstax_server
  *
  * Used by Phase 'server' to install search_api.server.<id> from the templated
  * YAML written under artifacts/.
  *
+ * No `use` statements: php:eval evaluates a raw body where imports are not
+ * allowed, so classes are referenced fully qualified.
+ *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
-use Symfony\Component\Yaml\Yaml;
-
-$file = getenv('SRSX_YAML_FILE') ?: '';
+$yaml = getenv('SRSX_YAML_CONTENT') ?: '';
 $name = getenv('SRSX_CONFIG_NAME') ?: '';
 
-if ($file === '' || $name === '') {
-  fwrite(STDERR, "[import-config-yaml] SRSX_YAML_FILE and SRSX_CONFIG_NAME are required.\n");
-  exit(1);
-}
-if (!is_file($file)) {
-  fwrite(STDERR, "[import-config-yaml] File not found: {$file}\n");
+if ($yaml === '' || $name === '') {
+  fwrite(STDERR, "[import-config-yaml] SRSX_YAML_CONTENT and SRSX_CONFIG_NAME are required.\n");
   exit(1);
 }
 
-$data = Yaml::parseFile($file);
+$data = \Symfony\Component\Yaml\Yaml::parse($yaml);
+if (!is_array($data)) {
+  fwrite(STDERR, "[import-config-yaml] YAML did not parse into a config array.\n");
+  exit(1);
+}
+
 \Drupal::configFactory()->getEditable($name)->setData($data)->save();
-fwrite(STDOUT, "[import-config-yaml] Imported {$name} from {$file}\n");
+fwrite(STDOUT, "[import-config-yaml] Imported {$name}\n");
 exit(0);
