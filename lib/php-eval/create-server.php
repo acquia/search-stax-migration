@@ -113,6 +113,27 @@ fwrite(STDOUT, "[create-server] host={$host} context={$context} core={$core} por
 fwrite(STDOUT, "[create-server] key_id: (none — credentials stored in config)\n");
 fwrite(STDOUT, "[create-server] Saved search_api.server.{$id}\n");
 
+// searchstax:copy-index only works for an index whose server is registered as
+// migrated (UtilityService::getMigratedServer), so record every legacy Solr
+// server as pointing at this one. Without this the command refuses with
+// "Migration is not supported for this index".
+if (\Drupal::hasService('solr_to_searchstax_ss_migration.utility')) {
+  $utility = \Drupal::service('solr_to_searchstax_ss_migration.utility');
+  foreach ($storage->loadMultiple() as $existing) {
+    if ($existing->id() === $id) {
+      continue;
+    }
+    if ($utility->isNonSearchStaxSolrServer($existing)) {
+      $utility->addMigratedServer($existing->id(), $id);
+      fwrite(STDOUT, "[create-server] registered migration: {$existing->id()} -> {$id}\n");
+    }
+  }
+}
+else {
+  fwrite(STDOUT, "[create-server] NOTE: solr_to_searchstax_ss_migration is not enabled,\n");
+  fwrite(STDOUT, "[create-server]       so 'searchstax:copy-index' will not be available.\n");
+}
+
 if ($token === '') {
   fwrite(STDOUT, "[create-server] WARNING: no read & write token was supplied; SearchStax will reject requests.\n");
 }

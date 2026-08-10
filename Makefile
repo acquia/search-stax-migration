@@ -52,6 +52,7 @@ test:
 	@bash tests/test-remote-php-and-endpoint.sh
 	@bash tests/test-phase-continues-onward.sh
 	@bash tests/test-cache-rebuild-resilient.sh
+	@bash tests/test-index-detection.sh
 
 demo:
 	@./srsx-migrate --demo

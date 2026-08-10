@@ -421,9 +421,17 @@ _drush_sapi_servers() {
   drush_capture "$1" search-api:server-list --format=json
 }
 
-# _drush_sapi_indexes <varname> — capture index status (with counts) as JSON
+# _drush_sapi_indexes <varname> — capture index status (with counts) as JSON.
+# NOTE: this reports id/name/complete/indexed/total only — it carries NO server
+# field. Use _drush_sapi_list when you need to know which server an index is on.
 _drush_sapi_indexes() {
   drush_capture "$1" search-api:status --format=json
+}
+
+# _drush_sapi_list <varname> — capture the index list as JSON. This is the one
+# that includes 'server' (the server id, or a localised "(none)").
+_drush_sapi_list() {
+  drush_capture "$1" search-api:list --format=json
 }
 
 # Run a shell command on the target Acquia env via `acli ssh`. Used by Phase
@@ -2057,26 +2065,54 @@ phase_index() {
 }
 
 _phase_index_site() {
-  local idx_json
-  _drush_sapi_indexes idx_json
+  local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
 
-  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
-    local legacy_ids
-    legacy_ids=$(printf '%s' "$idx_json" \
-      | jq -r 'to_entries[] | select(.value.server | startswith("searchstax") | not) | .key' \
-      || true)
-    if [[ -z "$legacy_ids" ]]; then
-      warn "No legacy (non-SearchStax) indexes found. Nothing to clone."
+  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
+    audit "drush search-api:list --format=json  # find indexes still on the legacy server"
+    audit "drush searchstax:copy-index <index>  # for each legacy index"
+  else
+    # `search-api:status` reports only id/name/complete/indexed/total — the
+    # server lives in `search-api:list`, which is why filtering on status
+    # never matched anything.
+    local list_json
+    _drush_sapi_list list_json
+
+    local total legacy_ids
+    total=$(printf '%s' "$list_json" | jq -r 'length' 2>/dev/null || echo 0)
+    if [[ "$total" == "0" ]]; then
+      warn "This site has no Search API indexes at all, so there is nothing to copy."
+      info "  Create one first (Search API → Add index), point it at the legacy"
+      info "  Solr server, then re-run:  ./srsx-migrate index --force"
       return 0
     fi
+
+    info "Indexes on this site:"
+    printf '%s' "$list_json" \
+      | jq -r 'to_entries[] | "    \(.key)  →  server: \(.value.server // "(none)")"' 2>/dev/null || true
+
+    legacy_ids=$(printf '%s' "$list_json" \
+      | jq -r --arg new "$server_id" \
+          'to_entries[] | select((.value.server // "") != $new) | .key' 2>/dev/null || true)
+
+    if [[ -z "$legacy_ids" ]]; then
+      warn "Every index is already on '${server_id}'. Nothing to copy."
+      return 0
+    fi
+
+    # searchstax:copy-index is the module's own command: it uses
+    # MigrationHelper::createIndexCopy() and records the copy, which the view
+    # switch later relies on. It needs the legacy server to be registered as
+    # migrated, which phase 'server' does when it creates the SearchStax server.
+    local idx
     while IFS= read -r idx; do
-      info "Cloning index: ${idx}"
-      drush_php clone-index.php \
-        "SRSX_INDEX_ID=${idx}" \
-        "SRSX_NEW_SERVER_ID=${SRSX_NEW_SERVER_ID:-searchstax_server}"
+      [[ -z "$idx" ]] && continue
+      info "Copying index '${idx}' → ${server_id}"
+      if ! drush searchstax:copy-index "$idx"; then
+        warn "  Could not copy '${idx}'."
+        warn "  'Migration is not supported for this index' means its server is not"
+        warn "  registered as migrated — re-run './srsx-migrate server --force' first."
+      fi
     done <<< "$legacy_ids"
-  else
-    audit "drush php:eval <clone-index.php>  # for each legacy index"
   fi
 
   # Multisite: namespace each site's documents with a per-site index_prefix so
@@ -2085,19 +2121,26 @@ _phase_index_site() {
   if (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]; then
     local prefix; prefix="$(_ssx_site_prefix "$DRUSH_URI")"
     info "Setting index_prefix '${prefix}' for ${DRUSH_URI}"
-    drush_php set-multisite-prefix.php "SRSX_PREFIX=${prefix}"
+    drush_php set-multisite-prefix.php \
+      "SRSX_PREFIX=${prefix}" \
+      "SRSX_SERVER_ID=${server_id}"
   fi
 
   drush_cr
 
-  # Reindex the new copies.
-  local new_json
-  _drush_sapi_indexes new_json
-  if [[ "$DRY_RUN" == "0" && "$DEMO" == "0" ]]; then
-    local new_ids
-    new_ids=$(printf '%s' "$new_json" \
-      | jq -r 'to_entries[] | select(.value.server | startswith("searchstax")) | .key' \
-      || true)
+  # Reindex whatever now sits on the SearchStax server.
+  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
+    audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
+  else
+    local after_json new_ids idx
+    _drush_sapi_list after_json
+    new_ids=$(printf '%s' "$after_json" \
+      | jq -r --arg new "$server_id" \
+          'to_entries[] | select((.value.server // "") == $new) | .key' 2>/dev/null || true)
+    if [[ -z "$new_ids" ]]; then
+      warn "No index ended up on '${server_id}'. Nothing was indexed."
+      return 0
+    fi
     while IFS= read -r idx; do
       [[ -z "$idx" ]] && continue
       info "Reindexing: ${idx}"
@@ -2105,11 +2148,9 @@ _phase_index_site() {
       drush sapi-i "$idx"
       drush sapi-s "$idx"
     done <<< "$new_ids"
-  else
-    audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
   fi
 
-  ok "Index cloning + reindex complete."
+  ok "Index copy + reindex complete."
 }
 
 # =============================================================================
@@ -2125,7 +2166,36 @@ phase_views() {
 }
 
 _phase_views_site() {
-  drush_php switch-view-index.php
+  local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "drush searchstax:switch-view-index <view>  # for each migrated view"
+    drush_cr
+    ok "Views switched to SearchStax-backed indexes."
+    return 0
+  fi
+
+  # Ask the site which views still point at a copied index. The module records
+  # the original → copy mapping itself, so we do not have to guess index names.
+  local views_out view_ids
+  views_out="$(drush_php list-migrated-views.php "SRSX_SERVER_ID=${server_id}")" || true
+  # Captured to parse, but still shown so the run stays readable.
+  [[ -n "$views_out" ]] && printf '%s\n' "$views_out"
+  view_ids="$(sed -n 's/^\[list-migrated-views\] view: //p' <<<"$views_out")"
+
+  if [[ -z "$view_ids" ]]; then
+    warn "No view is bound to a copied index yet — run 'index' first if you expected one."
+    return 0
+  fi
+
+  local view
+  while IFS= read -r view; do
+    [[ -z "$view" ]] && continue
+    info "Switching view '${view}' to its SearchStax index"
+    drush searchstax:switch-view-index "$view" \
+      || warn "  Could not switch view '${view}'."
+  done <<< "$view_ids"
+
   drush_cr
   ok "Views switched to SearchStax-backed indexes."
 }

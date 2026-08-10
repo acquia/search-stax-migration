@@ -32,6 +32,24 @@ case "$sub" in
   #   sapi-s  / search-api:status      → list indexes with counts
   #   sapi-rt / search-api:reset-tracker → reset tracker (action)
   sapi-sl|search-api:server-list)         emit drush-sapi-s.json ;;
+  sapi-l|search-api:list)
+    # The only command that reports which server an index is on.
+    if [[ -f "$FIX/.state-after-clone" ]]; then
+      emit drush-sapi-list-after-copy.json
+    else
+      emit drush-sapi-list.json
+    fi
+    ;;
+  searchstax:copy-index)
+    echo "[success] Successfully created index SearchStax index (ID: searchstax_index)."
+    touch "$FIX/.state-after-clone"
+    ;;
+  searchstax:switch-view-index)
+    echo "[success] Switched view ${args[1]:-?} to its SearchStax index."
+    ;;
+  searchstax:validate-migrations)
+    echo "[success] All migrations validated."
+    ;;
   sapi-s|search-api:status)
     # If a state file says "after-clone", return the post-clone variant.
     if [[ -f "$FIX/.state-after-clone" ]]; then
@@ -59,7 +77,8 @@ case "$sub" in
       *clone-index.php)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
       *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
-      *create-server.php)      echo "[create-server] connector: searchstax_token_auth (demo)."; echo "[create-server] Saved search_api.server.searchstax_server (demo)." ;;
+      *list-migrated-views.php) echo "[list-migrated-views] view: srsx_demo_search"; echo "[list-migrated-views] 1 view(s) to switch." ;;
+      *create-server.php)      echo "[create-server] connector: searchstax (demo)."; echo "[create-server] Saved search_api.server.searchstax_server (demo)." ;;
       *import-config-yaml.php) echo "[import-config-yaml] Imported (demo)." ;;
       *create-key-entity.php)  echo "[create-key-entity] Saved (demo)." ;;
       *)                       echo "[php:script] Ran ${f} (demo)." ;;

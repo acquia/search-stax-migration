@@ -19,11 +19,14 @@ if ($prefix === '') {
   fwrite(STDERR, "[set-multisite-prefix] SRSX_PREFIX is required.\n");
   return 1;
 }
+// Copies made by searchstax:copy-index are named "searchstax_index…", so they
+// are found by which server they sit on rather than by any name suffix.
+$server_id = getenv('SRSX_SERVER_ID') ?: 'searchstax_server';
 
 $indexStorage = \Drupal::entityTypeManager()->getStorage('search_api_index');
 $count = 0;
 foreach ($indexStorage->loadMultiple() as $idx) {
-  if (substr($idx->id(), -11) !== '_searchstax') {
+  if ($idx->getServerId() !== $server_id) {
     continue;
   }
   $opts = $idx->getOptions();

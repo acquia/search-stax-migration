@@ -84,7 +84,7 @@ echo "  endpoint decomposition (host/context/core + update endpoint) OK"
 # ---------------------------------------------------------------------------
 # 3. Each php-eval script must be invoked on the environment.
 # ---------------------------------------------------------------------------
-for s in create-server.php switch-view-index.php create-key-entity.php; do
+for s in create-server.php list-migrated-views.php create-key-entity.php; do
     grep -q "php:script ${s}" "$LOG" || fail "expected php:script invocation for ${s}" "$LOG"
 done
 

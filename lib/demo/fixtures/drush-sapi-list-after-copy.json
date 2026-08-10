@@ -1,0 +1,34 @@
+{
+  "default_index": {
+    "id": "default_index",
+    "name": "Default content index",
+    "server": "acquia_search_server",
+    "serverName": "Acquia Search",
+    "status": "enabled",
+    "limit": 50
+  },
+  "products_index": {
+    "id": "products_index",
+    "name": "Products",
+    "server": "acquia_search_server",
+    "serverName": "Acquia Search",
+    "status": "enabled",
+    "limit": 50
+  },
+  "searchstax_index": {
+    "id": "searchstax_index",
+    "name": "SearchStax index",
+    "server": "searchstax_server",
+    "serverName": "SearchStax Cloud",
+    "status": "enabled",
+    "limit": 50
+  },
+  "searchstax_index_2": {
+    "id": "searchstax_index_2",
+    "name": "SearchStax index",
+    "server": "searchstax_server",
+    "serverName": "SearchStax Cloud",
+    "status": "enabled",
+    "limit": 50
+  }
+}

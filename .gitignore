@@ -4,8 +4,9 @@ logs/
 state/
 migration.env
 
-# Local reference copy of drupal/searchstax, used to verify connector details.
+# Local reference copies of contrib modules, used to verify APIs against source.
 searchstax-1.x/
+search_api-8.x-1.x/
 migration.env.bak*
 *.log
 
