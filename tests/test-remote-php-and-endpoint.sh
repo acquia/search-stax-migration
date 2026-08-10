@@ -128,7 +128,7 @@ export PATH="$W:$PATH"
 MARKER="SRSXOK$$"
 BODY='fwrite(STDOUT,"payload executed\n");return 0;'
 B64="$(printf '%s' "$BODY" | base64 | tr -d '\n')"
-CODE="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;\$srsxrc=eval(base64_decode(\"${B64}\"));echo\"${MARKER}RC\".intval(\$srsxrc).PHP_EOL;"
+CODE="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;echo\"${MARKER}RC\".intval(eval(base64_decode(\"${B64}\"))).PHP_EOL;"
 
 # Splicing acli: the pre-quoted attempt must come through intact.
 out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODE}'" 2>&1 || true)"
@@ -143,7 +143,7 @@ out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODE}'" 2>&1 || tru
 # A failing script must surface its non-zero return, not look like success.
 BODY_FAIL='fwrite(STDERR,"boom\n");return 1;'
 B64F="$(printf '%s' "$BODY_FAIL" | base64 | tr -d '\n')"
-CODEF="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;\$srsxrc=eval(base64_decode(\"${B64F}\"));echo\"${MARKER}RC\".intval(\$srsxrc).PHP_EOL;"
+CODEF="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;echo\"${MARKER}RC\".intval(eval(base64_decode(\"${B64F}\"))).PHP_EOL;"
 out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODEF}'" 2>&1 || true)"
 [[ "$out" == *"${MARKER}RC1"* ]] \
     || { echo "FAIL: a failing script did not report a non-zero return"; echo "$out"; exit 1; }
@@ -153,9 +153,18 @@ out="$("$W/acli-quoted" remote:drush app.dev -- php:eval "${CODE}" 2>&1 || true)
 [[ "$out" == *"$MARKER"* && "$out" == *"payload executed"* ]] \
     || { echo "FAIL: bare payload fallback did not execute"; echo "$out"; exit 1; }
 
-# The payload must be a single shell word — no spaces, no newlines.
-[[ "$CODE" == *" "* ]]  && { echo "FAIL: payload contains a space"; exit 1; }
-[[ "$CODE" == *$'\n'* ]] && { echo "FAIL: payload contains a newline"; exit 1; }
+# The payload must be a single shell word — no spaces, no newlines — and must
+# contain no '$', which an intermediate double-quoted layer expands away and
+# leaves broken syntax behind ("syntax error near unexpected token").
+[[ "$CODE" == *" "* ]]   && { echo "FAIL: payload contains a space"; exit 1; }
+[[ "$CODE" == *$'\n'* ]]  && { echo "FAIL: payload contains a newline"; exit 1; }
+[[ "$CODE" == *'$'* ]]   && { echo "FAIL: payload contains a '\$', which does not survive ssh"; exit 1; }
+
+# Prove it: a '$' in the payload is destroyed by a double-quoted remote layer.
+dollar_payload='echo"M";$srsxrc=eval(base64_decode("AA"));'
+mangled="$(bash -c "inner() { echo \"\$1\"; }; inner \"drush php:eval '${dollar_payload}'\"" 2>&1)"
+[[ "$mangled" == *'=eval('* && "$mangled" != *'srsxrc'* ]] \
+    || { echo "FAIL: the \$-expansion hazard this guards against no longer reproduces"; echo "$mangled"; exit 1; }
 
 # Guard the mechanism itself, so drush_php cannot quietly go back to sending a
 # raw multi-line body (which is what acli tore apart).
@@ -166,8 +175,10 @@ grep -q "for attempt in \"'\${code}'\" \"\${code}\"" <<<"$fn" \
     || fail "drush_php no longer tries the pre-quoted then bare attempt"
 grep -q 'marker' <<<"$fn" \
     || fail "drush_php no longer verifies an execution marker"
-grep -q 'srsxrc' <<<"$fn" \
-    || fail "drush_php no longer captures the eval return code"
+grep -q 'intval(eval(base64_decode' <<<"$fn" \
+    || fail "drush_php no longer captures the eval return code inline"
+grep -q '[$]srsxrc' <<<"$fn" \
+    && fail "drush_php reintroduced a '\$' into the payload (it does not survive ssh)"
 
 echo "  php:eval payload shell-safety OK"
 echo "  remote-php-and-endpoint OK"

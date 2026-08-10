@@ -292,11 +292,13 @@ drush_php() {
   local payload marker code
   payload="$(printf '%s' "$body" | base64 | tr -d '\n')"
   marker="SRSXOK${$}"
-  # No spaces: the bare attempt below is only viable if nothing splits on them.
-  # The scripts `return` rather than exit() — exit() inside eval would kill the
-  # drush process mid-command ("Drush command terminated abnormally") — so the
-  # eval's return value is echoed back as the real status.
-  code="/*srsx-script:${script}*/echo\"${marker}\".PHP_EOL;\$srsxrc=eval(base64_decode(\"${payload}\"));echo\"${marker}RC\".intval(\$srsxrc).PHP_EOL;"
+  # The payload crosses acli, ssh and a remote `bash -c`, so it must contain no
+  # spaces, no newlines and no '$' — a '$name' is expanded away by whichever
+  # layer quotes with double quotes, which leaves broken syntax behind. Hence
+  # the eval result is consumed inline rather than through a variable.
+  # The scripts `return` rather than exit(): exit() inside eval would kill the
+  # drush process mid-command ("Drush command terminated abnormally").
+  code="/*srsx-script:${script}*/echo\"${marker}\".PHP_EOL;echo\"${marker}RC\".intval(eval(base64_decode(\"${payload}\"))).PHP_EOL;"
 
   local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>"
   info "Running ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ (${DRUSH_URI})}"
