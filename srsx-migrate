@@ -265,25 +265,60 @@ drush_capture() {
 # the script body as a php:eval argument (arguments do cross the boundary) with
 # putenv() calls prepended, which keeps each script's existing getenv() reads
 # working unchanged. Values are base64-encoded so quotes/newlines are safe.
+#
+# acli splices arguments into a remote `bash -c` string, so the argument must
+# survive a shell round-trip: the real body is base64'd into a single
+# space-free, newline-free token, and the wrapper is tried both pre-quoted and
+# bare because acli versions differ in whether they quote for you. A marker
+# echoed before the eval proves PHP actually executed the payload rather than
+# silently treating it as a string literal.
 drush_php() {
   local script="$1"; shift
   local file="${SCRIPT_DIR}/lib/php-eval/${script}"
   [[ -f "$file" ]] || err "php-eval script missing: ${file}"
 
-  # Marker line lets the demo drush shim tell which script is running.
-  local code="// srsx-script: ${script}"$'\n'
-  local kv key val b64
+  local body="" kv key val b64
   for kv in "$@"; do
     key="${kv%%=*}"; val="${kv#*=}"
     b64="$(printf '%s' "$val" | base64 | tr -d '\n')"
-    code+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
+    body+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
   done
   # Drop the opening <?php tag; php:eval evaluates a raw PHP body.
-  code+="$(tail -n +2 "$file")"
+  body+="$(tail -n +2 "$file")"
 
+  local payload marker code
+  payload="$(printf '%s' "$body" | base64 | tr -d '\n')"
+  marker="SRSXOK${$}"
+  # No spaces: the bare attempt below is only viable if nothing splits on them.
+  code="/*srsx-script:${script}*/echo\"${marker}\";eval(base64_decode(\"${payload}\"));"
+
+  local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>"
   info "Running ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ (${DRUSH_URI})}"
-  SRSX_AUDIT_OVERRIDE="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>" \
-    drush php:eval "$code"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "$label"
+    return 0
+  fi
+  if [[ "$DEMO" == "1" ]]; then
+    SRSX_AUDIT_OVERRIDE="$label" drush php:eval "$code"
+    return 0
+  fi
+
+  local attempt out rc
+  for attempt in "'${code}'" "${code}"; do
+    out=""; rc=0
+    out="$(SRSX_AUDIT_OVERRIDE="$label" drush php:eval "$attempt" 2>&1)" || rc=$?
+    if [[ "$out" == *"$marker"* ]]; then
+      # Strip the marker line; surface everything the script printed.
+      printf '%s\n' "$out" | grep -vF "$marker" || true
+      (( rc == 0 )) || return "$rc"
+      return 0
+    fi
+  done
+
+  err "Could not execute ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+       The remote 'drush php:eval' never reported back. Last output:
+${out}"
 }
 
 # ---------------------------------------------------------------------------

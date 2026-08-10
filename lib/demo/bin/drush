@@ -65,16 +65,16 @@ case "$sub" in
     esac
     ;;
   php:eval|php-eval)
-    # srsx-migrate inlines lib/php-eval/*.php as a php:eval body prefixed with
-    # a "// srsx-script: <name>" marker; dispatch on that.
+    # srsx-migrate inlines lib/php-eval/*.php as a php:eval body tagged with a
+    # /*srsx-script:<name>*/ comment; dispatch on that.
     code="${args[1]:-}"
     case "$code" in
-      *"srsx-script: clone-index.php"*)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
-      *"srsx-script: switch-view-index.php"*)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
-      *"srsx-script: set-multisite-prefix.php"*) echo "[set-multisite-prefix] OK (demo)." ;;
-      *"srsx-script: import-config-yaml.php"*) echo "[import-config-yaml] Imported (demo)." ;;
-      *"srsx-script: create-key-entity.php"*)  echo "[create-key-entity] Saved (demo)." ;;
-      *)                                       echo "[php:eval] (demo)." ;;
+      *"srsx-script:clone-index.php"*)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
+      *"srsx-script:switch-view-index.php"*)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
+      *"srsx-script:set-multisite-prefix.php"*) echo "[set-multisite-prefix] OK (demo)." ;;
+      *"srsx-script:import-config-yaml.php"*) echo "[import-config-yaml] Imported (demo)." ;;
+      *"srsx-script:create-key-entity.php"*)  echo "[create-key-entity] Saved (demo)." ;;
+      *)                                      echo "[php:eval] (demo)." ;;
     esac
     ;;
   key-add)                                echo "Key added (demo)." ;;
