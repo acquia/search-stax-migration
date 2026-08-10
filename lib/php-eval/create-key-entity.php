@@ -17,11 +17,11 @@ $keyId = getenv('SRSX_KEY_ID') ?: 'searchstax_analytics_key';
 
 if ($value === '') {
   fwrite(STDERR, "[create-key-entity] SRSX_KEY_VALUE is required.\n");
-  exit(1);
+  return 1;
 }
 if (!\Drupal::moduleHandler()->moduleExists('key')) {
   fwrite(STDERR, "[create-key-entity] The 'key' module is not enabled.\n");
-  exit(1);
+  return 1;
 }
 
 $storage = \Drupal::entityTypeManager()->getStorage('key');
@@ -43,4 +43,4 @@ if (!$entity) {
 }
 $entity->save();
 fwrite(STDOUT, "[create-key-entity] Saved key entity '{$keyId}'\n");
-exit(0);
+return 0;

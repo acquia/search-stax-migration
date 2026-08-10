@@ -293,7 +293,10 @@ drush_php() {
   payload="$(printf '%s' "$body" | base64 | tr -d '\n')"
   marker="SRSXOK${$}"
   # No spaces: the bare attempt below is only viable if nothing splits on them.
-  code="/*srsx-script:${script}*/echo\"${marker}\";eval(base64_decode(\"${payload}\"));"
+  # The scripts `return` rather than exit() — exit() inside eval would kill the
+  # drush process mid-command ("Drush command terminated abnormally") — so the
+  # eval's return value is echoed back as the real status.
+  code="/*srsx-script:${script}*/echo\"${marker}\".PHP_EOL;\$srsxrc=eval(base64_decode(\"${payload}\"));echo\"${marker}RC\".intval(\$srsxrc).PHP_EOL;"
 
   local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>"
   info "Running ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ (${DRUSH_URI})}"
@@ -307,18 +310,19 @@ drush_php() {
     return 0
   fi
 
-  local attempt out rc
+  local attempt out phprc
   for attempt in "'${code}'" "${code}"; do
-    out=""; rc=0
-    out="$(SRSX_AUDIT_OVERRIDE="$label" drush php:eval "$attempt" 2>&1)" || rc=$?
-    if [[ "$out" == *"$marker"* ]]; then
-      # Strip the marker line; surface everything the script printed.
-      printf '%s\n' "$out" | grep -vF "$marker" || true
-      if (( rc != 0 )); then
-        # Drush reached PHP but Drupal never booted — almost always a missing
-        # --uri, since drush cannot pick a site on its own for a multisite.
-        if [[ "$out" == *"container is not initialized"* ]]; then
-          err "Drupal did not bootstrap on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ for --uri=${DRUSH_URI}}.
+    out="$(SRSX_AUDIT_OVERRIDE="$label" drush php:eval "$attempt" 2>&1)" || true
+    # No marker means PHP never evaluated the payload — try the other quoting.
+    [[ "$out" == *"$marker"* ]] || continue
+
+    phprc="$(sed -n "s/.*${marker}RC\([0-9][0-9]*\).*/\1/p" <<<"$out" | tail -1)"
+    printf '%s\n' "$out" | grep -vF "$marker" || true
+
+    if [[ -z "$phprc" ]]; then
+      # Started but never returned: a PHP fatal, usually a failed bootstrap.
+      if [[ "$out" == *"container is not initialized"* ]]; then
+        err "Drupal did not bootstrap on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ for --uri=${DRUSH_URI}}.
        drush ran, but no site was booted, so ${script} could not touch config.
        This is what happens on a multisite when no --uri is passed.
        If ${ACQUIA_APP} is a multisite (Site Factory included), declare the
@@ -326,11 +330,11 @@ drush_php() {
          ./srsx-migrate init        # answer 'y' to the multisite question
          ./srsx-migrate ${SRSX_CURRENT_PHASE:-server} --force
        Current SITES: ${SITES:-(none — treated as single-site)}"
-        fi
-        return "$rc"
       fi
-      return 0
+      err "${script} stopped part-way on ${ACQUIA_APP}.${EFFECTIVE_ENV} (PHP fatal). Output above."
     fi
+    (( phprc == 0 )) || err "${script} reported failure (code ${phprc}) on ${ACQUIA_APP}.${EFFECTIVE_ENV}. Output above."
+    return 0
   done
 
   err "Could not execute ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}.

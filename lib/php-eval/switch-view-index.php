@@ -28,7 +28,7 @@ foreach ($indexStorage->loadMultiple() as $idx) {
 
 if (!$map) {
   fwrite(STDERR, "[switch-view-index] No '*_searchstax' indexes found. Run clone-index.php first.\n");
-  exit(1);
+  return 1;
 }
 
 $changed = 0;
@@ -53,4 +53,4 @@ foreach ($config_factory->listAll('views.view.') as $name) {
 }
 
 fwrite(STDOUT, "[switch-view-index] Updated {$changed} view config object(s).\n");
-exit(0);
+return 0;

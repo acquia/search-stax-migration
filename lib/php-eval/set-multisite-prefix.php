@@ -17,7 +17,7 @@
 $prefix = getenv('SRSX_PREFIX') ?: '';
 if ($prefix === '') {
   fwrite(STDERR, "[set-multisite-prefix] SRSX_PREFIX is required.\n");
-  exit(1);
+  return 1;
 }
 
 $indexStorage = \Drupal::entityTypeManager()->getStorage('search_api_index');
@@ -35,4 +35,4 @@ foreach ($indexStorage->loadMultiple() as $idx) {
 }
 
 fwrite(STDOUT, "[set-multisite-prefix] Updated {$count} index(es).\n");
-exit(0);
+return 0;

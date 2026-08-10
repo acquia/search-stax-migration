@@ -19,7 +19,7 @@ $serverId = getenv('SRSX_NEW_SERVER_ID') ?: 'searchstax_server';
 
 if ($indexId === '') {
   fwrite(STDERR, "[clone-index] SRSX_INDEX_ID is required.\n");
-  exit(1);
+  return 1;
 }
 
 $index = \Drupal::entityTypeManager()
@@ -28,7 +28,7 @@ $index = \Drupal::entityTypeManager()
 
 if (!$index) {
   fwrite(STDERR, "[clone-index] Index not found: {$indexId}\n");
-  exit(1);
+  return 1;
 }
 
 $server = \Drupal::entityTypeManager()
@@ -37,7 +37,7 @@ $server = \Drupal::entityTypeManager()
 
 if (!$server) {
   fwrite(STDERR, "[clone-index] Target server not found: {$serverId}\n");
-  exit(1);
+  return 1;
 }
 
 if (\Drupal::hasService('solr_to_searchstax_ss_migration.utility')) {
@@ -45,7 +45,7 @@ if (\Drupal::hasService('solr_to_searchstax_ss_migration.utility')) {
   // Method signature mirrors what CloneIndexesForm uses.
   $newId = $utility->cloneIndex($index, $server);
   fwrite(STDOUT, "[clone-index] OK: {$indexId} -> {$newId}\n");
-  exit(0);
+  return 0;
 }
 
 // Fallback: hand-rolled clone using only Search-API core APIs.
@@ -56,4 +56,4 @@ $clone->set('server', $serverId);
 $clone->set('status', TRUE);
 $clone->save();
 fwrite(STDOUT, "[clone-index] OK (fallback): {$indexId} -> {$clone->id()}\n");
-exit(0);
+return 0;

@@ -24,15 +24,15 @@ $name = getenv('SRSX_CONFIG_NAME') ?: '';
 
 if ($yaml === '' || $name === '') {
   fwrite(STDERR, "[import-config-yaml] SRSX_YAML_CONTENT and SRSX_CONFIG_NAME are required.\n");
-  exit(1);
+  return 1;
 }
 
 $data = \Symfony\Component\Yaml\Yaml::parse($yaml);
 if (!is_array($data)) {
   fwrite(STDERR, "[import-config-yaml] YAML did not parse into a config array.\n");
-  exit(1);
+  return 1;
 }
 
 \Drupal::configFactory()->getEditable($name)->setData($data)->save();
 fwrite(STDOUT, "[import-config-yaml] Imported {$name}\n");
-exit(0);
+return 0;

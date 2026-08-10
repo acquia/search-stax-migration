@@ -35,7 +35,13 @@ if grep -rn '^use ' lib/php-eval/*.php; then
     fail "lib/php-eval/*.php must not use 'use' imports (invalid under php:eval)"
 fi
 
-echo "  no php:script call sites / no illegal 'use' imports OK"
+# exit() inside eval() kills the whole drush process mid-command, which drush
+# reports as "Drush command terminated abnormally" — the scripts must `return`.
+if grep -n 'exit(' lib/php-eval/*.php; then
+    fail "lib/php-eval/*.php must 'return' instead of exit() (exit kills drush under php:eval)"
+fi
+
+echo "  no php:script call sites / no illegal 'use' imports / no exit() OK"
 
 # ---------------------------------------------------------------------------
 # 2. Endpoint decomposition — drive a full demo run with a real-world URL.
@@ -100,6 +106,9 @@ cat > "$W/fakedrush" <<'EOF'
 [[ "$1" == "php:eval" ]] || { echo "unexpected argv: $*" >&2; exit 2; }
 (( $# == 2 )) || { echo "Too many arguments to \"php:eval\" command, expected arguments \"code\"." >&2; exit 1; }
 php -r "$2"
+# Only reached if the payload did not kill the process, which is what drush
+# reports as "Drush command terminated abnormally".
+echo "DRUSH FINISHED NORMALLY"
 EOF
 # Splices args into a remote shell without quoting them (the failing behaviour).
 cat > "$W/acli-splice" <<'EOF'
@@ -117,14 +126,27 @@ chmod +x "$W"/fakedrush "$W"/acli-splice "$W"/acli-quoted
 export PATH="$W:$PATH"
 
 MARKER="SRSXOK$$"
-BODY='echo "payload executed\n";'
+BODY='fwrite(STDOUT,"payload executed\n");return 0;'
 B64="$(printf '%s' "$BODY" | base64 | tr -d '\n')"
-CODE="/*srsx-script:probe.php*/echo\"${MARKER}\";eval(base64_decode(\"${B64}\"));"
+CODE="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;\$srsxrc=eval(base64_decode(\"${B64}\"));echo\"${MARKER}RC\".intval(\$srsxrc).PHP_EOL;"
 
 # Splicing acli: the pre-quoted attempt must come through intact.
 out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODE}'" 2>&1 || true)"
 [[ "$out" == *"$MARKER"* && "$out" == *"payload executed"* ]] \
     || { echo "FAIL: payload did not survive an unquoted acli splice"; echo "$out"; exit 1; }
+[[ "$out" == *"${MARKER}RC0"* ]] \
+    || { echo "FAIL: return code was not reported back"; echo "$out"; exit 1; }
+# The status line only appears if drush was still alive after the eval.
+[[ "$out" == *"DRUSH FINISHED NORMALLY"* ]] \
+    || { echo "FAIL: drush died mid-command (this is the 'terminated abnormally' bug)"; echo "$out"; exit 1; }
+
+# A failing script must surface its non-zero return, not look like success.
+BODY_FAIL='fwrite(STDERR,"boom\n");return 1;'
+B64F="$(printf '%s' "$BODY_FAIL" | base64 | tr -d '\n')"
+CODEF="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;\$srsxrc=eval(base64_decode(\"${B64F}\"));echo\"${MARKER}RC\".intval(\$srsxrc).PHP_EOL;"
+out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODEF}'" 2>&1 || true)"
+[[ "$out" == *"${MARKER}RC1"* ]] \
+    || { echo "FAIL: a failing script did not report a non-zero return"; echo "$out"; exit 1; }
 
 # Quoting acli: drush_php falls back to the bare form, which must also work.
 out="$("$W/acli-quoted" remote:drush app.dev -- php:eval "${CODE}" 2>&1 || true)"
@@ -144,6 +166,8 @@ grep -q "for attempt in \"'\${code}'\" \"\${code}\"" <<<"$fn" \
     || fail "drush_php no longer tries the pre-quoted then bare attempt"
 grep -q 'marker' <<<"$fn" \
     || fail "drush_php no longer verifies an execution marker"
+grep -q 'srsxrc' <<<"$fn" \
+    || fail "drush_php no longer captures the eval return code"
 
 echo "  php:eval payload shell-safety OK"
 echo "  remote-php-and-endpoint OK"
