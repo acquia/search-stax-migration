@@ -95,7 +95,7 @@ EOF
 #   analytics-key storage: 1
 B_LOG=/tmp/srsx-topology-b.log
 DEMO_ANSWERS="1,2,https://app1.example.searchstax.com,r1,w1,,https://app2.example.searchstax.com,r2,w2,,1" \
-    ./srsx-migrate --demo configure </dev/null >"$B_LOG" 2>&1 \
+    ./srsx-migrate --demo configure --only </dev/null >"$B_LOG" 2>&1 \
     || fail "scenario B configure exited non-zero" "$B_LOG"
 
 grep -qi "at least 2 app" "$B_LOG" \

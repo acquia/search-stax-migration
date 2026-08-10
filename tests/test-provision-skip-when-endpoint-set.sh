@@ -43,8 +43,9 @@ export PATH="$WORK/bin:$PATH"
 mkdir -p "$WORK/state"
 : > "$WORK/state/init.done"
 
-# Provision should print the skip message and exit 0.
-out="$(./srsx-migrate --yes provision </dev/null 2>&1)" || {
+# Provision should print the skip message and exit 0. --only keeps this to the
+# one phase; without it a named phase continues into the ones that follow.
+out="$(./srsx-migrate --yes provision --only </dev/null 2>&1)" || {
     rc=$?
     echo "FAIL: provision exited $rc"
     echo "--- output ---"

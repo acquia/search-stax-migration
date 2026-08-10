@@ -102,6 +102,8 @@ DEMO=0
 USE_COLOR=1
 ASSUME_YES=0
 FORCE=0                    # --force re-runs done phases; with 'all' it resets progress first.
+RUN_ONLY=0                 # --only stops after the named phase instead of continuing.
+SRSX_CURRENT_PHASE=""      # Name of the phase currently running (set by header()).
 PHASE_START_TIME=0         # Unix timestamp when current phase started (set by header()).
 declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
 LOG_FILE=""
@@ -165,6 +167,7 @@ init_colors() {
 header() {
   local phase="$1" subtitle="${2:-}"
   PHASE_START_TIME="$(date +%s)"
+  SRSX_CURRENT_PHASE="$phase"
   printf '\n%s' "$C_HEAD"
   printf '═%.0s' {1..71}
   printf '%s\n' "$C_RST"
@@ -311,7 +314,21 @@ drush_php() {
     if [[ "$out" == *"$marker"* ]]; then
       # Strip the marker line; surface everything the script printed.
       printf '%s\n' "$out" | grep -vF "$marker" || true
-      (( rc == 0 )) || return "$rc"
+      if (( rc != 0 )); then
+        # Drush reached PHP but Drupal never booted — almost always a missing
+        # --uri, since drush cannot pick a site on its own for a multisite.
+        if [[ "$out" == *"container is not initialized"* ]]; then
+          err "Drupal did not bootstrap on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ for --uri=${DRUSH_URI}}.
+       drush ran, but no site was booted, so ${script} could not touch config.
+       This is what happens on a multisite when no --uri is passed.
+       If ${ACQUIA_APP} is a multisite (Site Factory included), declare the
+       sites once and re-run:
+         ./srsx-migrate init        # answer 'y' to the multisite question
+         ./srsx-migrate ${SRSX_CURRENT_PHASE:-server} --force
+       Current SITES: ${SITES:-(none — treated as single-site)}"
+        fi
+        return "$rc"
+      fi
       return 0
     fi
   done
@@ -2271,7 +2288,8 @@ ${C_BOLD}USAGE${C_RST}
   ./srsx-migrate                  Interactive guided run (resume or start).
   ./srsx-migrate init             Reset & (re-)run first-run setup (re-asks
                                   app, target env, and multisite/sites).
-  ./srsx-migrate <phase>          Run a single phase.
+  ./srsx-migrate <phase>          Start at <phase> and continue through the
+                                  remaining phases (add --only for just one).
   ./srsx-migrate all              Run all phases sequentially with prompts.
   ./srsx-migrate validate --env <name>
                                    Read-only validation against any env (incl. prod).
@@ -2290,6 +2308,8 @@ ${C_BOLD}GLOBAL FLAGS${C_RST}
   --yes, -y                       Auto-confirm all prompts (use with care).
   --force                         Re-run a phase even if marked done. With
                                   'all', clear saved phase progress first.
+  --only                          With a phase name, run just that phase
+                                  instead of continuing to the ones after it.
   --env <name>                    (validate only) Target a non-default env.
 
 ${C_BOLD}WHAT THIS TOOLKIT DOES${C_RST}
@@ -2394,9 +2414,18 @@ dispatch() {
       ;;
     preflight|install|backup|provision|configure|server|index|views|route|handoff|cleanup)
       ensure_init
-      "phase_$1"
+      if [[ "$RUN_ONLY" == "1" ]]; then
+        "phase_$1"
+      else
+        # Naming a phase means "pick up here" — continue through the remaining
+        # phases. Use --only to run just the one.
+        RUN_FROM="$1"
+        run_all
+      fi
       ;;
     validate)
+      # Read-only and frequently pointed at another env with --env, so it never
+      # rolls on into the mutating phases that follow it.
       ensure_init
       "phase_validate"
       ;;
@@ -2426,6 +2455,7 @@ main() {
       --no-color)  USE_COLOR=0; shift ;;
       --yes|-y)    ASSUME_YES=1; shift ;;
       --force)     FORCE=1; shift ;;
+      --only)      RUN_ONLY=1; shift ;;
       --env)
         [[ $# -ge 2 ]] || err "--env requires a value (e.g. --env prod)"
         env_override="$2"; shift 2 ;;

@@ -50,6 +50,7 @@ test:
 	@bash tests/test-provision-demo-skip.sh
 	@bash tests/test-multisite-app-topology.sh
 	@bash tests/test-remote-php-and-endpoint.sh
+	@bash tests/test-phase-continues-onward.sh
 
 demo:
 	@./srsx-migrate --demo
