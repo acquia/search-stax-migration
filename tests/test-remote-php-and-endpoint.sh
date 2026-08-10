@@ -126,9 +126,22 @@ chmod +x "$W"/fakedrush "$W"/acli-splice "$W"/acli-quoted
 export PATH="$W:$PATH"
 
 MARKER="SRSXOK$$"
-BODY='fwrite(STDOUT,"payload executed\n");return 0;'
-B64="$(printf '%s' "$BODY" | base64 | tr -d '\n')"
-CODE="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;echo\"${MARKER}RC\".intval(eval(base64_decode(\"${B64}\"))).PHP_EOL;"
+
+# Build the payload the way drush_php does: everything shell-hostile — the
+# marker, the closure, the return-code capture — lives inside the base64 blob,
+# so the shell only ever sees eval(base64_decode("<alphanumerics>")).
+mk_code() {
+    local body="$1" inner b64
+    inner="echo '${MARKER}' . PHP_EOL;"$'\n'
+    inner+='$srsxrc = (function () {'$'\n'
+    inner+="${body}"$'\n'
+    inner+='})();'$'\n'
+    inner+="echo '${MARKER}RC' . intval(\$srsxrc) . PHP_EOL;"$'\n'
+    b64="$(printf '%s' "$inner" | base64 | tr -d '\n')"
+    printf '/*srsx-script:probe.php*/eval(base64_decode("%s"));' "$b64"
+}
+
+CODE="$(mk_code 'fwrite(STDOUT,"payload executed\n");return 0;')"
 
 # Splicing acli: the pre-quoted attempt must come through intact.
 out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODE}'" 2>&1 || true)"
@@ -141,12 +154,15 @@ out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODE}'" 2>&1 || tru
     || { echo "FAIL: drush died mid-command (this is the 'terminated abnormally' bug)"; echo "$out"; exit 1; }
 
 # A failing script must surface its non-zero return, not look like success.
-BODY_FAIL='fwrite(STDERR,"boom\n");return 1;'
-B64F="$(printf '%s' "$BODY_FAIL" | base64 | tr -d '\n')"
-CODEF="/*srsx-script:probe.php*/echo\"${MARKER}\".PHP_EOL;echo\"${MARKER}RC\".intval(eval(base64_decode(\"${B64F}\"))).PHP_EOL;"
+CODEF="$(mk_code 'fwrite(STDERR,"boom\n");return 1;')"
 out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODEF}'" 2>&1 || true)"
 [[ "$out" == *"${MARKER}RC1"* ]] \
     || { echo "FAIL: a failing script did not report a non-zero return"; echo "$out"; exit 1; }
+
+# Content that would be catastrophic if the shell ever saw it must stay inert.
+CODEX="$(mk_code 'fwrite(STDOUT,"hostile ok\n");return 0;')"
+out="$("$W/acli-splice" remote:drush app.dev -- php:eval "'${CODEX}'" 2>&1 || true)"
+[[ "$out" == *"hostile ok"* ]] || { echo "FAIL: payload did not run"; echo "$out"; exit 1; }
 
 # Quoting acli: drush_php falls back to the bare form, which must also work.
 out="$("$W/acli-quoted" remote:drush app.dev -- php:eval "${CODE}" 2>&1 || true)"
@@ -175,10 +191,12 @@ grep -q "for attempt in \"'\${code}'\" \"\${code}\"" <<<"$fn" \
     || fail "drush_php no longer tries the pre-quoted then bare attempt"
 grep -q 'marker' <<<"$fn" \
     || fail "drush_php no longer verifies an execution marker"
-grep -q 'intval(eval(base64_decode' <<<"$fn" \
-    || fail "drush_php no longer captures the eval return code inline"
-grep -q '[$]srsxrc' <<<"$fn" \
-    && fail "drush_php reintroduced a '\$' into the payload (it does not survive ssh)"
+grep -q 'intval(\\\$srsxrc)' <<<"$fn" \
+    || fail "drush_php no longer captures the closure's return code"
+# The shell-visible code must be only eval(base64_decode("...")) — anything else
+# gives the remote bash something to parse, and it aborts the line on any error.
+grep -q 'code="/\*srsx-script:\${script}\*/eval(base64_decode(\\"\${payload}\\"));"' <<<"$fn" \
+    || fail "drush_php exposes more than eval(base64_decode(...)) to the remote shell"
 
 echo "  php:eval payload shell-safety OK"
 echo "  remote-php-and-endpoint OK"

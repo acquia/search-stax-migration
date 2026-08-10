@@ -264,41 +264,39 @@ drush_capture() {
 # `drush php:script` cannot be used here: drush executes on the Acquia server,
 # but the toolkit lives in a gitignored tools/ directory that is never deployed,
 # so the file does not exist remotely — and SRSX_* variables set locally do not
-# survive the SSH hop, so getenv() would come back empty anyway. Instead we send
-# the script body as a php:eval argument (arguments do cross the boundary) with
-# putenv() calls prepended, which keeps each script's existing getenv() reads
-# working unchanged. Values are base64-encoded so quotes/newlines are safe.
+# survive the SSH hop, so getenv() would come back empty anyway.
 #
-# acli splices arguments into a remote `bash -c` string, so the argument must
-# survive a shell round-trip: the real body is base64'd into a single
-# space-free, newline-free token, and the wrapper is tried both pre-quoted and
-# bare because acli versions differ in whether they quote for you. A marker
-# echoed before the eval proves PHP actually executed the payload rather than
-# silently treating it as a string literal.
+# The command crosses acli, ssh and a remote `bash -c`, and bash aborts a whole
+# line on a single syntax error, so anything it can parse is a hazard. Every
+# shell-hostile character therefore lives INSIDE the base64 blob — the putenv()
+# calls, the quotes, the newlines, the return-code capture. All the remote shell
+# ever sees is eval(base64_decode("<alphanumerics>")).
+#
+# The script body is wrapped in a closure so its top-level `return` becomes the
+# status; it must not exit(), which would kill drush mid-command.
 drush_php() {
   local script="$1"; shift
   local file="${SCRIPT_DIR}/lib/php-eval/${script}"
   [[ -f "$file" ]] || err "php-eval script missing: ${file}"
 
-  local body="" kv key val b64
+  local marker="SRSXOK${$}"
+  local inner="" kv key val b64
   for kv in "$@"; do
     key="${kv%%=*}"; val="${kv#*=}"
     b64="$(printf '%s' "$val" | base64 | tr -d '\n')"
-    body+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
+    inner+="putenv('${key}=' . base64_decode('${b64}'));"$'\n'
   done
+  inner+="echo '${marker}' . PHP_EOL;"$'\n'
+  # shellcheck disable=SC2016 # $srsxrc is PHP, not shell — it must stay literal.
+  inner+='$srsxrc = (function () {'$'\n'
   # Drop the opening <?php tag; php:eval evaluates a raw PHP body.
-  body+="$(tail -n +2 "$file")"
+  inner+="$(tail -n +2 "$file")"$'\n'
+  inner+='})();'$'\n'
+  inner+="echo '${marker}RC' . intval(\$srsxrc) . PHP_EOL;"$'\n'
 
-  local payload marker code
-  payload="$(printf '%s' "$body" | base64 | tr -d '\n')"
-  marker="SRSXOK${$}"
-  # The payload crosses acli, ssh and a remote `bash -c`, so it must contain no
-  # spaces, no newlines and no '$' — a '$name' is expanded away by whichever
-  # layer quotes with double quotes, which leaves broken syntax behind. Hence
-  # the eval result is consumed inline rather than through a variable.
-  # The scripts `return` rather than exit(): exit() inside eval would kill the
-  # drush process mid-command ("Drush command terminated abnormally").
-  code="/*srsx-script:${script}*/echo\"${marker}\".PHP_EOL;echo\"${marker}RC\".intval(eval(base64_decode(\"${payload}\"))).PHP_EOL;"
+  local payload code
+  payload="$(printf '%s' "$inner" | base64 | tr -d '\n')"
+  code="/*srsx-script:${script}*/eval(base64_decode(\"${payload}\"));"
 
   local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} php:eval <${script}>"
   info "Running ${script} on ${ACQUIA_APP}.${EFFECTIVE_ENV}${DRUSH_URI:+ (${DRUSH_URI})}"
