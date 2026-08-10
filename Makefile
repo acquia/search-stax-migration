@@ -51,6 +51,7 @@ test:
 	@bash tests/test-multisite-app-topology.sh
 	@bash tests/test-remote-php-and-endpoint.sh
 	@bash tests/test-phase-continues-onward.sh
+	@bash tests/test-cache-rebuild-resilient.sh
 
 demo:
 	@./srsx-migrate --demo

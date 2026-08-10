@@ -342,6 +342,36 @@ drush_php() {
 ${out}"
 }
 
+# drush_cr — rebuild caches without letting a broken container abort the run.
+#
+# A contrib module with a bad service definition makes container compilation
+# fail, so every subsequent `drush cr` fails too. That is worth reporting
+# loudly, but it must not strand the migration half-way through: the config
+# changes around it are already saved and the remaining phases still apply.
+SRSX_CR_FAILED=0
+drush_cr() {
+  local out="" rc=0
+  local label="acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} --${DRUSH_URI:+ --uri=${DRUSH_URI}} cr"
+  out="$(SRSX_AUDIT_OVERRIDE="$label" drush cr 2>&1)" || rc=$?
+  [[ -n "$out" ]] && printf '%s\n' "$out"
+  (( rc == 0 )) && return 0
+
+  SRSX_CR_FAILED=1
+  warn "Cache rebuild failed${DRUSH_URI:+ on ${DRUSH_URI}} — continuing with the migration."
+  if [[ "$out" == *"must implement interface"* && "$out" == *"EventSubscriberInterface"* ]]; then
+    local svc
+    svc="$(sed -n 's/.*Service "\([^"]*\)" must implement.*/\1/p' <<<"$out" | head -1)"
+    warn "  A module registers ${svc:-a service} as an event subscriber, but its class
+       does not implement EventSubscriberInterface, so Drupal cannot compile its
+       service container. This is a module-side defect, not a migration step.
+       Until it is fixed the site keeps serving its previously built container,
+       so your config changes will not take effect on the front end.
+       Fix it before you deploy: update or patch the module that provides
+       ${svc:-that service}, then re-run:  ./srsx-migrate ${SRSX_CURRENT_PHASE:-server} --force"
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Search-API drush command wrappers.
 #
@@ -1941,7 +1971,7 @@ _phase_server_site() {
     "SRSX_YAML_CONTENT=$(cat "$out")" \
     "SRSX_CONFIG_NAME=search_api.server.${server_id}"
 
-  drush cr
+  drush_cr
   # Verify
   local got
   drush_capture got config:get "search_api.server.${server_id}" --format=json
@@ -2003,7 +2033,7 @@ _phase_index_site() {
     drush_php set-multisite-prefix.php "SRSX_PREFIX=${prefix}"
   fi
 
-  drush cr
+  drush_cr
 
   # Reindex the new copies.
   local new_json
@@ -2041,7 +2071,7 @@ phase_views() {
 
 _phase_views_site() {
   drush_php switch-view-index.php
-  drush cr
+  drush_cr
   ok "Views switched to SearchStax-backed indexes."
 }
 
@@ -2089,7 +2119,7 @@ _phase_route_site() {
     esac
   fi
 
-  drush cr
+  drush_cr
   ok "SearchStudio routing enabled${DRUSH_URI:+ on ${DRUSH_URI}}."
 }
 
@@ -2386,6 +2416,18 @@ run_all() {
         ;;
     esac
   done
+  srsx_cr_reminder
+}
+
+# A failed container rebuild is easy to scroll past, so restate it at the end.
+srsx_cr_reminder() {
+  (( SRSX_CR_FAILED )) || return 0
+  printf '\n'
+  warn "One or more cache rebuilds failed during this run."
+  warn "  Drupal is still serving its previously compiled service container, so the
+       migrated search config will NOT be live until 'drush cr' succeeds.
+       Fix the module that broke container compilation (see the error above),
+       then run:  acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- cr"
 }
 
 dispatch() {
