@@ -69,7 +69,6 @@ FILES=(
   "lib/demo/fixtures/drush-config-get.json"
   "lib/demo/fixtures/drush-pm-list.json"
   "lib/demo/fixtures/composer-require.txt"
-  "lib/demo/fixtures/switch-view-result.txt"
   "templates/search_api.server.searchstax.yml.tmpl"
 )
 

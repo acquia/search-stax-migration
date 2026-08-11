@@ -1,1 +1,0 @@
-[switch-view-index] OK srsx_demo_search: default_index -> searchstax_index

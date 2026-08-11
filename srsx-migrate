@@ -2134,13 +2134,16 @@ _phase_index_site() {
       warn "Run './srsx-migrate doctor' to see what each index is actually attached to."
       return 0
     fi
+    local -a new_arr=()
     while IFS= read -r idx; do
-      [[ -z "$idx" ]] && continue
+      [[ -n "$idx" ]] && new_arr+=("$idx")
+    done <<< "$new_ids"
+    for idx in "${new_arr[@]}"; do
       info "Reindexing: ${idx}"
       drush sapi-rt "$idx"
       drush sapi-i "$idx"
       drush sapi-s "$idx"
-    done <<< "$new_ids"
+    done
   fi
 
   ok "Index copy + reindex complete."
@@ -2180,8 +2183,18 @@ _phase_index_copy() {
     return 1
   fi
 
+  # Collected into an array before acting on it. `acli` reads stdin, so running
+  # it inside `while read ... <<< "$list"` swallows the remaining lines and the
+  # loop silently stops after the first item that touches the environment.
+  local -a rows=()
+  local row
+  while IFS= read -r row; do
+    [[ -n "$row" ]] && rows+=("$row")
+  done <<< "$classified"
+
   local cls idx srv backend copied=0
-  while IFS=$'\t' read -r cls idx srv backend; do
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r cls idx srv backend <<< "$row"
     [[ -z "$idx" ]] && continue
     case "$cls" in
       target)
@@ -2203,7 +2216,7 @@ _phase_index_copy() {
         info "  To move it anyway:  SRSX_COPY_INDEXES='${idx}' ./srsx-migrate index --force"
         ;;
     esac
-  done <<< "$classified"
+  done
 
   # Explicit opt-in for anything the classifier declined to move on its own.
   local -a forced_ids=()
@@ -2325,33 +2338,63 @@ _phase_views_site() {
 
   # Ask the site which views still point at a copied index. The module records
   # the original → copy mapping itself, so we do not have to guess index names.
-  local views_out view_ids
+  local views_out
   if ! views_out="$(drush_php_soft list-migrated-views.php "SRSX_SERVER_ID=${server_id}")"; then
-    [[ -n "$views_out" ]] && printf '%s\n' "$views_out"
+    [[ -n "$views_out" ]] && grep -v '^\[srsx-' <<<"$views_out"
     _srsx_site_fail "no index copy is recorded, so no view can be switched"
     warn "Run './srsx-migrate index --force' until it reports a copy, then re-run this phase."
     return 0
   fi
-  # Captured to parse, but still shown so the run stays readable.
-  [[ -n "$views_out" ]] && printf '%s\n' "$views_out"
-  view_ids="$(sed -n 's/^\[list-migrated-views\] view: //p' <<<"$views_out")"
+  grep -v '^\[srsx-' <<<"$views_out" || true
 
-  if [[ -z "$view_ids" ]]; then
+  # Collected into an array before acting on it. `acli` reads stdin, so running
+  # it inside `while read ... <<< "$list"` swallows the remaining lines and the
+  # loop silently stops after the first view.
+  local -a views=()
+  local view
+  while IFS= read -r view; do
+    [[ -n "$view" ]] && views+=("$view")
+  done <<< "$(awk -F'\t' '$1=="[srsx-view]"{print $2}' <<<"$views_out")"
+
+  if (( ${#views[@]} == 0 )); then
     warn "Indexes were copied, but no view is bound to any of them — nothing to switch here."
     return 0
   fi
 
+  # A view's index is decided by its base_table, and the report above prints it
+  # for every Search API view. If only some of them should move, name them.
+  if [[ -n "${SRSX_SWITCH_VIEWS:-}" ]]; then
+    local -a wanted=() kept=()
+    read -r -a wanted <<< "$SRSX_SWITCH_VIEWS"
+    local w
+    for view in "${views[@]}"; do
+      for w in "${wanted[@]}"; do
+        [[ "$view" == "$w" ]] && kept+=("$view") && break
+      done
+    done
+    info "SRSX_SWITCH_VIEWS is set: switching ${#kept[@]} of ${#views[@]} view(s)."
+    views=("${kept[@]}")
+    if (( ${#views[@]} == 0 )); then
+      warn "None of the views named in SRSX_SWITCH_VIEWS is bound to a copied index."
+      return 0
+    fi
+  fi
+
   # switch-view-index.php calls the same MigrationHelper methods as
-  # `drush searchstax:switch-view-index`, which only exists from 1.12.0.
-  local view
-  while IFS= read -r view; do
-    [[ -z "$view" ]] && continue
+  # `drush searchstax:switch-view-index`, which only exists from 1.12.0, and
+  # rewrites the view itself on releases that have no such service.
+  local before_failure="$SRSX_SITE_HAD_FAILURE"
+  for view in "${views[@]}"; do
     site_step "switch view '${view}'" \
       drush_php_soft switch-view-index.php "SRSX_VIEW_ID=${view}"
-  done <<< "$view_ids"
+  done
 
   drush_cr
-  ok "Views switched to SearchStax-backed indexes."
+  if [[ "$SRSX_SITE_HAD_FAILURE" == "$before_failure" ]]; then
+    ok "Switched ${#views[@]} view(s) to SearchStax-backed indexes."
+  else
+    warn "Some views could not be switched${DRUSH_URI:+ on ${DRUSH_URI}} — see the summary below."
+  fi
 }
 
 # =============================================================================

@@ -6,11 +6,15 @@
  *
  * The module records every index copy itself (UtilityService::getCopiedIndexes,
  * original id => copy id), so the mapping is read from there rather than guessed
- * from index names — searchstax:copy-index names copies "searchstax_index…",
- * not "<original>_searchstax".
+ * from index names — copies are called "searchstax_index…", not
+ * "<original>_searchstax".
  *
- * Prints one "[list-migrated-views] view: <id>" line per view still bound to an
- * index that has a copy, which the caller feeds to searchstax:switch-view-index.
+ * A view's index is decided by its base_table, so that is what is reported: the
+ * views to switch, and every other Search API view with the table it sits on.
+ *
+ * Emits tab-separated rows the views phase consumes:
+ *
+ *   [srsx-view]<TAB>view_id<TAB>base_table<TAB>old_index<TAB>new_index
  *
  * Invoked via srsx-migrate's drush_php helper, which sets SRSX_* via putenv().
  *
@@ -43,20 +47,46 @@ fwrite(STDOUT, "[list-migrated-views] copied indexes: "
     )) . "\n");
 
 $storage = \Drupal::entityTypeManager()->getStorage('view');
-$found = 0;
+$rows = [];
+$skipped = [];
 foreach ($storage->loadMultiple() as $view) {
   $base = $view->get('base_table');
-  // Search API views use a "search_api_index_<id>" base table.
-  if (!is_string($base) || strpos($base, 'search_api_index_') !== 0) {
+  if (!is_string($base) || strpos($base, 'search_api_') !== 0) {
     continue;
   }
-  $index_id = substr($base, strlen('search_api_index_'));
-  if (!isset($copied[$index_id])) {
+  // Search API views sit on search_api_index_<id> or
+  // search_api_datasource_<id>_<datasource>. Both the index ID and the
+  // datasource contain underscores, so the index is identified by testing the
+  // copied ones against the table name rather than by splitting the string.
+  // switch-view-index.php resolves it the same way; they must agree.
+  $matched = '';
+  foreach (array_keys($copied) as $index_id) {
+    if (preg_match('/^search_api_(?:index|datasource)_' . preg_quote($index_id, '/') . '(_\w+)?$/', $base)) {
+      $matched = $index_id;
+      break;
+    }
+  }
+  if ($matched === '') {
+    $skipped[] = $view->id() . ' (' . $base . ')';
     continue;
   }
-  fwrite(STDOUT, "[list-migrated-views] view: " . $view->id() . "\n");
-  $found++;
+  $rows[] = "[srsx-view]\t{$view->id()}\t{$base}\t{$matched}\t{$copied[$matched]}";
+  fwrite(STDOUT, '[list-migrated-views] view: ' . $view->id()
+    . '  base_table=' . $base . '  ' . $matched . ' -> ' . $copied[$matched] . "\n");
 }
 
-fwrite(STDOUT, "[list-migrated-views] {$found} view(s) to switch.\n");
+// Printed so "that view isn't really on Acquia Search" can be checked against
+// the config rather than argued about: base_table is what decides.
+if ($skipped) {
+  fwrite(STDOUT, '[list-migrated-views] other Search API views, left alone ('
+    . count($skipped) . "):\n");
+  foreach ($skipped as $entry) {
+    fwrite(STDOUT, "[list-migrated-views]   {$entry}\n");
+  }
+}
+
+fwrite(STDOUT, '[list-migrated-views] ' . count($rows) . " view(s) to switch.\n");
+foreach ($rows as $row) {
+  fwrite(STDOUT, $row . "\n");
+}
 return 0;

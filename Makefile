@@ -54,6 +54,7 @@ test:
 	@bash tests/test-cache-rebuild-resilient.sh
 	@bash tests/test-index-detection.sh
 	@bash tests/test-clone-index.sh
+	@bash tests/test-loop-stdin.sh
 
 demo:
 	@./srsx-migrate --demo

@@ -63,7 +63,9 @@ if (\Drupal::hasService('solr_to_searchstax_ss_migration.migration_helper')) {
   return 0;
 }
 
-fwrite(STDOUT, "[clone-index] solr_to_searchstax_ss_migration is not enabled; copying by hand.\n");
+fwrite(STDOUT, $utility
+  ? "[clone-index] this searchstax release has no migration_helper service; copying by hand.\n"
+  : "[clone-index] solr_to_searchstax_ss_migration is not enabled; copying by hand.\n");
 
 // The same field surgery createIndexCopy() performs, so a fallback copy stays
 // interchangeable with one made through the module.

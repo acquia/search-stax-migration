@@ -99,9 +99,26 @@ case "$sub" in
           printf '[srsx-index]\ttarget\tsearchstax_index\tsearchstax_server\tsearch_api_solr\n'
         fi
         ;;
-      *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
+      *switch-view-index.php)
+        view="(unknown)"
+        for a in "${args[@]}"; do
+          [[ "$a" == SRSX_VIEW_ID=* ]] && view="${a#SRSX_VIEW_ID=}"
+        done
+        echo "[switch-view-index] OK ${view}: default_index -> searchstax_index"
+        ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
-      *list-migrated-views.php) echo "[list-migrated-views] view: srsx_demo_search"; echo "[list-migrated-views] 1 view(s) to switch." ;;
+      *list-migrated-views.php)
+        echo "[list-migrated-views] copied indexes: default_index -> searchstax_index"
+        echo "[list-migrated-views] view: srsx_demo_search  base_table=search_api_index_default_index  default_index -> searchstax_index"
+        echo "[list-migrated-views] view: srsx_demo_news  base_table=search_api_index_default_index  default_index -> searchstax_index"
+        echo "[list-migrated-views] view: srsx_demo_events  base_table=search_api_index_default_index  default_index -> searchstax_index"
+        echo "[list-migrated-views] other Search API views, left alone (1):"
+        echo "[list-migrated-views]   srsx_demo_media (search_api_index_media_library)"
+        echo "[list-migrated-views] 3 view(s) to switch."
+        printf '[srsx-view]\tsrsx_demo_search\tsearch_api_index_default_index\tdefault_index\tsearchstax_index\n'
+        printf '[srsx-view]\tsrsx_demo_news\tsearch_api_index_default_index\tdefault_index\tsearchstax_index\n'
+        printf '[srsx-view]\tsrsx_demo_events\tsearch_api_index_default_index\tdefault_index\tsearchstax_index\n'
+        ;;
       *create-server.php)      echo "[create-server] connector: searchstax (demo)."; echo "[create-server] Saved search_api.server.searchstax_server (demo)." ;;
       *import-config-yaml.php) echo "[import-config-yaml] Imported (demo)." ;;
       *create-key-entity.php)  echo "[create-key-entity] Saved (demo)." ;;
