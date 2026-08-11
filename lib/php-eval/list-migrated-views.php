@@ -30,8 +30,8 @@ if (\Drupal::hasService('solr_to_searchstax_ss_migration.utility')) {
   $copied = \Drupal::service('solr_to_searchstax_ss_migration.utility')->getCopiedIndexes();
 }
 if (!$copied) {
-  fwrite(STDOUT, "[list-migrated-views] No copied indexes are recorded yet. Run the index phase first.\n");
-  return 0;
+  fwrite(STDERR, "[list-migrated-views] No copied indexes are recorded yet. Run the index phase first.\n");
+  return 1;
 }
 fwrite(STDOUT, "[list-migrated-views] copied indexes: "
   . implode(', ', array_map(

@@ -86,8 +86,18 @@ case "$sub" in
       *inspect-index-topology.php)
         echo "[topology] searchstax module version: 1.11.0"
         echo "[topology] solr_to_searchstax_ss_migration: enabled"
-        echo "[topology]   acquia_search_server  backend=search_api_solr  connector=solr_cloud  legacy-solr=yes"
-        echo "[topology]   default_index  server(entity)='acquia_search_server'  server(raw config)='acquia_search_server'"
+        echo "[topology] servers (2):"
+        echo "[topology]   acquia_search_server  backend=search_api_solr  connector=solr_acquia_connector  legacy-solr=yes  status=enabled"
+        echo "[topology]   searchstax_server  backend=search_api_solr  connector=searchstax  legacy-solr=no  status=enabled"
+        echo "[topology] indexes:"
+        echo "[topology]   default_index  server(entity)='acquia_search_server'  [legacy]"
+        echo "[topology]   products_index  server(entity)='acquia_search_server'  [legacy]"
+        printf '[srsx-target]\tok\tsearchstax_server\tsearchstax\n'
+        printf '[srsx-index]\tlegacy\tdefault_index\tacquia_search_server\tsearch_api_solr\n'
+        printf '[srsx-index]\tlegacy\tproducts_index\tacquia_search_server\tsearch_api_solr\n'
+        if [[ -f "$DSTATE/.state-after-clone" ]]; then
+          printf '[srsx-index]\ttarget\tsearchstax_index\tsearchstax_server\tsearch_api_solr\n'
+        fi
         ;;
       *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;

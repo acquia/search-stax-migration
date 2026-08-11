@@ -436,10 +436,14 @@ _drush_sapi_indexes() {
   drush_capture "$1" search-api:status --format=json
 }
 
-# _drush_sapi_list <varname> — capture the index list as JSON. This is the one
-# that includes 'server' (the server id, or a localised "(none)").
+# _drush_sapi_list <varname> — capture the index list as JSON.
+#
+# --fields is NOT optional. The command's default field set is
+# id,name,serverName,typeNames,status,limit: `serverName` is a human label and
+# the machine-readable `server` (a server ID) is omitted, so the default JSON
+# cannot tell you which server an index is on. Ask for the columns by name.
 _drush_sapi_list() {
-  drush_capture "$1" search-api:list --format=json
+  drush_capture "$1" search-api:list --format=json --fields=id,name,server,serverName,status
 }
 
 # Run a shell command on the target Acquia env via `acli ssh`. Used by Phase
@@ -2098,7 +2102,7 @@ _phase_index_site() {
   local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
-    audit "drush search-api:list --format=json  # classify indexes by server"
+    audit "drush php:script inspect-index-topology.php  # classify indexes by server"
     audit "drush php:script clone-index.php  # for each legacy index"
   else
     _phase_index_copy "$server_id" || return 0
@@ -2121,11 +2125,9 @@ _phase_index_site() {
   if [[ "$DRY_RUN" == "1" ]]; then
     audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
   else
-    local after_json new_ids idx
-    _drush_sapi_list after_json
-    new_ids=$(printf '%s' "$after_json" \
-      | jq -r --arg new "$server_id" \
-          'to_entries[] | select((.value.server // "") == $new) | .key' 2>/dev/null || true)
+    local after new_ids idx
+    after="$(drush_php_soft inspect-index-topology.php "SRSX_SERVER_ID=${server_id}")" || after=""
+    new_ids="$(awk -F'\t' '$1=="[srsx-index]" && $2=="target"{print $3}' <<<"$after")"
     if [[ -z "$new_ids" ]]; then
       _srsx_site_fail "no index on '${server_id}' after copying"
       warn "Nothing is on '${server_id}', so there is nothing to index."
@@ -2145,18 +2147,32 @@ _phase_index_site() {
 }
 
 # Classify every index on this site and copy the ones that belong on SearchStax.
-# Returns non-zero when the site cannot proceed (module missing, no indexes).
+# Returns non-zero when the site cannot proceed (module missing, no target
+# server, no indexes).
+#
+# The classification comes from inspect-index-topology.php, not from
+# `search-api:list --format=json`: that command's default field set omits the
+# machine-readable `server` column entirely (it ships `serverName`, a human
+# label), so every index came back looking detached.
 _phase_index_copy() {
   local server_id="$1"
 
   _ensure_migration_module || return 1
 
-  local list_json
-  _drush_sapi_list list_json
+  local topology
+  topology="$(drush_php_soft inspect-index-topology.php "SRSX_SERVER_ID=${server_id}")" || {
+    _srsx_site_fail "could not read the Search-API topology"
+    return 1
+  }
+  # Shown as well as parsed, so the run stays readable.
+  grep -v '^\[srsx-' <<<"$topology" || true
 
-  local total
-  total=$(printf '%s' "$list_json" | jq -r 'length' 2>/dev/null || echo 0)
-  if [[ "$total" == "0" ]]; then
+  _phase_index_check_target "$server_id" "$topology" || return 1
+
+  # awk, not sed: BSD sed does not read \t as a tab in a regex.
+  local classified
+  classified="$(awk -F'\t' -v OFS='\t' '$1=="[srsx-index]"{print $2,$3,$4,$5}' <<<"$topology")"
+  if [[ -z "$classified" ]]; then
     _srsx_site_fail "no Search API indexes on this site"
     warn "This site has no Search API indexes at all, so there is nothing to copy."
     info "  Create one first (Search API → Add index), point it at the legacy"
@@ -2164,56 +2180,94 @@ _phase_index_copy() {
     return 1
   fi
 
-  # search_api prints a localised "(none)" for an index with no server, so an
-  # unattached index has to be recognised by that string as well as by "".
-  local classified
-  classified=$(printf '%s' "$list_json" \
-    | jq -r --arg new "$server_id" '
-        to_entries[]
-        | (.value.server // "") as $s
-        | (if ($s == "" or $s == "(none)") then "detached"
-           elif $s == $new then "target"
-           else "legacy" end) as $cls
-        | "\($cls)\t\(.key)\t\($s)"' 2>/dev/null || true)
-
-  info "Indexes on this site:"
-  local cls idx srv
-  while IFS=$'\t' read -r cls idx srv; do
-    [[ -z "$idx" ]] && continue
-    info "    ${idx}  →  server: ${srv:-(none)}  [${cls}]"
-  done <<< "$classified"
-
-  local copied=0
-  while IFS=$'\t' read -r cls idx srv; do
+  local cls idx srv backend copied=0
+  while IFS=$'\t' read -r cls idx srv backend; do
     [[ -z "$idx" ]] && continue
     case "$cls" in
       target)
         info "Already on '${server_id}': ${idx}"
         ;;
-      detached)
-        if [[ "${SRSX_COPY_DETACHED_INDEXES:-0}" == "1" ]]; then
-          site_step "copy detached index '${idx}'" \
-            drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}"
-          copied=1
-        else
-          warn "Skipping '${idx}': it is not attached to any server."
-          warn "  An index with no server was never serving search, so copying it is"
-          warn "  rarely what you want. Confirm with './srsx-migrate doctor' first; if"
-          warn "  it really should move, re-run with SRSX_COPY_DETACHED_INDEXES=1."
-        fi
-        ;;
-      *)
-        site_step "copy index '${idx}'" \
+      legacy)
+        site_step "copy index '${idx}' (from ${srv})" \
           drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}"
         copied=1
+        ;;
+      other)
+        info "Skipping '${idx}': its server '${srv}' is a ${backend:-non-Solr} backend, not Acquia Search."
+        info "  Moving it to SearchStax is a product decision, not part of this migration."
+        info "  To move it anyway:  SRSX_COPY_INDEXES='${idx}' ./srsx-migrate index --force"
+        ;;
+      *)
+        info "Skipping '${idx}': it is not attached to any server."
+        info "  An index with no server was never serving search."
+        info "  To move it anyway:  SRSX_COPY_INDEXES='${idx}' ./srsx-migrate index --force"
         ;;
     esac
   done <<< "$classified"
 
+  # Explicit opt-in for anything the classifier declined to move on its own.
+  local -a forced_ids=()
+  read -r -a forced_ids <<< "${SRSX_COPY_INDEXES:-}"
+  local forced forced_cls
+  for forced in "${forced_ids[@]}"; do
+    forced_cls="$(awk -F'\t' -v id="$forced" '$2==id{print $1}' <<<"$classified")"
+    case "$forced_cls" in
+      "")
+        warn "SRSX_COPY_INDEXES names '${forced}', which does not exist on this site."
+        ;;
+      legacy|target)
+        ;;
+      *)
+        site_step "copy index '${forced}' (forced, ${forced_cls})" \
+          drush_php_soft clone-index.php "SRSX_INDEX_ID=${forced}" "SRSX_NEW_SERVER_ID=${server_id}"
+        copied=1
+        ;;
+    esac
+  done
+
   if (( copied == 0 )); then
+    _srsx_site_fail "no index was eligible to copy"
     warn "No index was copied on this site."
+    return 1
   fi
   return 0
+}
+
+# The target server has to exist and actually be SearchStax-backed: a copy made
+# onto a missing or misconfigured server produces an index that indexes nowhere.
+_phase_index_check_target() {
+  local server_id="$1" topology="$2"
+  local state="" connector=""
+  IFS=$'\t' read -r state _ connector \
+    < <(awk -F'\t' -v OFS='\t' '$1=="[srsx-target]"{print $2,$3,$4}' <<<"$topology") || true
+
+  case "$state" in
+    ok) return 0 ;;
+    missing)
+      _srsx_site_fail "search server '${server_id}' does not exist"
+      warn "There is no '${server_id}' server on this site, so there is nothing to copy onto."
+      warn "  Create it first, then re-run:"
+      warn "    ./srsx-migrate server --force"
+      warn "    ./srsx-migrate index --force"
+      ;;
+    not-solr)
+      _srsx_site_fail "search server '${server_id}' is not a Solr server"
+      warn "'${server_id}' exists but does not use the search_api_solr backend."
+      warn "  Re-create it with:  ./srsx-migrate server --force"
+      ;;
+    wrong-connector)
+      _srsx_site_fail "search server '${server_id}' uses the '${connector}' connector"
+      warn "'${server_id}' uses the '${connector}' Solr connector, not the SearchStax one."
+      warn "  A server built this way never reaches SearchStax, so copying onto it"
+      warn "  would look like success and index nothing. Re-create it with:"
+      warn "    ./srsx-migrate server --force"
+      ;;
+    *)
+      _srsx_site_fail "could not determine the state of '${server_id}'"
+      warn "The topology report did not say whether '${server_id}' is usable."
+      ;;
+  esac
+  return 1
 }
 
 # The copy helper lives in solr_to_searchstax_ss_migration; without it we fall
@@ -2272,13 +2326,18 @@ _phase_views_site() {
   # Ask the site which views still point at a copied index. The module records
   # the original → copy mapping itself, so we do not have to guess index names.
   local views_out view_ids
-  views_out="$(drush_php list-migrated-views.php "SRSX_SERVER_ID=${server_id}")" || true
+  if ! views_out="$(drush_php_soft list-migrated-views.php "SRSX_SERVER_ID=${server_id}")"; then
+    [[ -n "$views_out" ]] && printf '%s\n' "$views_out"
+    _srsx_site_fail "no index copy is recorded, so no view can be switched"
+    warn "Run './srsx-migrate index --force' until it reports a copy, then re-run this phase."
+    return 0
+  fi
   # Captured to parse, but still shown so the run stays readable.
   [[ -n "$views_out" ]] && printf '%s\n' "$views_out"
   view_ids="$(sed -n 's/^\[list-migrated-views\] view: //p' <<<"$views_out")"
 
   if [[ -z "$view_ids" ]]; then
-    warn "No view is bound to a copied index yet — run 'index' first if you expected one."
+    warn "Indexes were copied, but no view is bound to any of them — nothing to switch here."
     return 0
   fi
 
@@ -2538,18 +2597,25 @@ run_doctor() {
   header "doctor" "Report how Drupal sees the Search-API servers and indexes."
   for_each_site _doctor_site
   info ""
-  info "Read the 'server(entity)' and 'server(raw config)' columns together:"
-  info "  • both empty        → the index really is detached; nothing points it at Solr."
-  info "  • they differ       → a config override supplies the server, so drush and the"
-  info "                        web UI disagree and the module's copy form sees a"
-  info "                        different topology than this toolkit does."
-  info "  • legacy-solr=no on every server → nothing is registered as migratable, so"
-  info "                        'searchstax:copy-index' would refuse even on 1.12.0+."
+  info "How to read the report:"
+  info "  • [legacy]   on a non-SearchStax Solr server → the index phase copies it."
+  info "  • [target]   already on the SearchStax server → nothing to do."
+  info "  • [other]    on a database (or other non-Solr) server → left alone; moving"
+  info "               it to SearchStax is a product decision, not a migration step."
+  info "  • [detached] no server at all → left alone; it was never serving search."
+  info "  Force either of the last two with:  SRSX_COPY_INDEXES='<id> <id>'"
+  info ""
+  info "  server(entity) vs server(raw config) differing means a config override"
+  info "  supplies the server, so drush and the web UI see different topologies."
+  info "  An empty migrated_servers map only affects the module's own UI form —"
+  info "  this toolkit copies through the service directly and does not need it."
 }
 
 _doctor_site() {
-  drush_php inspect-index-topology.php || \
-    warn "Could not inspect topology${DRUSH_URI:+ on ${DRUSH_URI}}."
+  drush_php_soft inspect-index-topology.php \
+      "SRSX_SERVER_ID=${SRSX_NEW_SERVER_ID:-searchstax_server}" \
+    | grep -v '^\[srsx-' \
+    || warn "Could not inspect topology${DRUSH_URI:+ on ${DRUSH_URI}}."
 }
 
 # =============================================================================

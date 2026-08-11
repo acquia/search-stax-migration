@@ -107,13 +107,18 @@ If verification fails, prints the manual UI fallback URL and pauses.
 
 ## `index`
 
-Every index on the site is classified from `drush search-api:list --format=json`:
+Every index on the site is classified by `lib/php-eval/inspect-index-topology.php`, which asks Drupal's entity API directly. `drush search-api:list --format=json` cannot answer this: its default field set is `id,name,serverName,typeNames,status,limit`, so the machine-readable `server` column is omitted and only the human `serverName` label ships — which made every index look unattached.
 
-| Class | `server` value | Action |
+| Class | Where the index sits | Action |
 | --- | --- | --- |
-| `target` | the SearchStax server id | skipped, already migrated |
-| `legacy` | any other server id | copied |
-| `detached` | empty or `(none)` | skipped unless `SRSX_COPY_DETACHED_INDEXES=1` |
+| `target` | the SearchStax server | skipped, already migrated |
+| `legacy` | a non-SearchStax Solr server | copied |
+| `other` | a non-Solr server (`search_api_db`, …) | skipped — moving it is a product decision |
+| `detached` | no server, or a server that no longer exists | skipped — it was never serving search |
+
+`other` and `detached` indexes can be moved anyway with `SRSX_COPY_INDEXES='<id> <id>'`.
+
+Before copying anything, the target server itself is checked. A `missing`, `not-solr` or `wrong-connector` verdict fails the site immediately with instructions to re-run `./srsx-migrate server --force` — a copy made onto a server that is not really SearchStax-backed looks like success and indexes nowhere.
 
 For each index to copy:
 

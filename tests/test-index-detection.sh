@@ -28,24 +28,40 @@ cd "$(dirname "$0")/.."
 
 fail() { echo "FAIL: $1"; [[ -n "${2:-}" ]] && { echo "--- log ---"; tail -30 "$2"; }; exit 1; }
 
-# --- the phase must read the server from `search-api:list` -------------------
-grep -q '_drush_sapi_list() {' srsx-migrate \
-    || fail "no _drush_sapi_list helper: the server field only exists in search-api:list"
-grep -q 'search-api:list --format=json' srsx-migrate \
-    || fail "_drush_sapi_list must call search-api:list"
+# --- classification must NOT come from `search-api:list` ---------------------
+# Its default field set is id,name,serverName,typeNames,status,limit: `server`
+# (the machine-readable server ID) is omitted and `serverName` is a human label,
+# so every index came back looking as if it had no server.
+grep -q 'fields=id,name,server,serverName,status' srsx-migrate \
+    || fail "_drush_sapi_list must ask for the 'server' field explicitly"
 
 fn="$(sed -n '/^_phase_index_copy()/,/^}/p' srsx-migrate)"
 [[ -n "$fn" ]] || fail "no _phase_index_copy function in srsx-migrate"
-grep -q '_drush_sapi_list' <<<"$fn" \
-    || fail "the index phase still does not consult search-api:list"
-if grep -q '_drush_sapi_indexes' <<<"$fn"; then
-    fail "the index phase reads search-api:status, which has no 'server' field"
+grep -q 'inspect-index-topology.php' <<<"$fn" \
+    || fail "the index phase must classify from inspect-index-topology.php"
+if grep -qE '_drush_sapi_(list|indexes)' <<<"$fn"; then
+    fail "the index phase still classifies from drush output instead of the entity API"
+fi
+site_fn="$(sed -n '/^_phase_index_site()/,/^}/p' srsx-migrate)"
+if grep -qE '_drush_sapi_(list|indexes)' <<<"$site_fn"; then
+    fail "the post-copy check still reads drush output instead of the entity API"
 fi
 # The old filter blew up on a null server; nothing may depend on it again.
 if grep -q 'startswith("searchstax")' <<<"$fn"; then
     fail "index phase still matches server names by prefix instead of the server id"
 fi
-echo "  index phase reads the server from search-api:list OK"
+echo "  index phase classifies from the entity API, not search-api:list OK"
+
+# --- a missing or misconfigured target server must stop the site -------------
+grep -q '_phase_index_check_target' srsx-migrate \
+    || fail "index phase must verify the target server before copying"
+for state in missing not-solr wrong-connector; do
+    grep -q "$state" srsx-migrate \
+        || fail "index phase does not handle a '${state}' target server"
+    grep -q "$state" lib/php-eval/inspect-index-topology.php \
+        || fail "topology script never reports a '${state}' target server"
+done
+echo "  a missing or non-SearchStax target server fails the site OK"
 
 # --- copies go through the module's service, not its drush command ------------
 # Comment lines are stripped: the code explains why those commands are avoided.
@@ -84,33 +100,29 @@ grep -q 'addMigratedServer' lib/php-eval/create-server.php \
     || fail "create-server.php must register the legacy server as migrated"
 echo "  legacy server is registered as migrated OK"
 
-# --- a null/missing server must never abort the filter -----------------------
-command -v jq >/dev/null 2>&1 || { echo "  (jq missing — skipping filter check)"; exit 0; }
+# --- the tab-separated topology rows must parse portably ---------------------
+# BSD sed does not read \t as a tab in a regex, so the parsing uses awk.
+topology="$(printf '[topology] noise\n[srsx-target]\tok\tsearchstax_server\tsearchstax\n[srsx-index]\tlegacy\tpublic_content_types\tacquia_search_server\tacquia_search_solr\n[srsx-index]\tother\tblog_articles\tdatabase_server\tsearch_api_db\n[srsx-index]\tdetached\tacquia_search_index\t\t\n[srsx-index]\ttarget\tsearchstax_index\tsearchstax_server\tsearch_api_solr\n')"
 
-# Shape returned by search-api:status: no 'server' key at all.
-status_json='{"a":{"id":"a","name":"A","complete":"-","indexed":0,"total":0}}'
-if printf '%s' "$status_json" | jq -e 'to_entries[] | select(.value.server | startswith("x"))' >/dev/null 2>&1; then
-    fail "expected the old filter to be broken against real status output"
-fi
+got="$(awk -F'\t' -v OFS=':' '$1=="[srsx-index]"{print $2,$3}' <<<"$topology" | tr '\n' ' ')"
+[[ "$got" == "legacy:public_content_types other:blog_articles detached:acquia_search_index target:searchstax_index " ]] \
+    || fail "topology rows did not parse (got: '${got}')"
 
-# The classifier must split target / legacy / detached, and treat the localised
-# "(none)" that search_api prints for an unattached index as detached — not as
-# a legacy server named "(none)".
-classify() {
-    jq -r --arg new "searchstax_server" '
-      to_entries[]
-      | (.value.server // "") as $s
-      | (if ($s == "" or $s == "(none)") then "detached"
-         elif $s == $new then "target"
-         else "legacy" end) as $cls
-      | "\($cls):\(.key)"'
-}
+got="$(awk -F'\t' '$1=="[srsx-index]" && $2=="target"{print $3}' <<<"$topology")"
+[[ "$got" == "searchstax_index" ]] \
+    || fail "post-copy check did not find the index on the target server (got: '${got}')"
 
-list_json='{"a":{"server":"acquia_search_server"},"b":{"server":null},"c":{},"d":{"server":"(none)"},"n":{"server":"searchstax_server"}}'
-got="$(printf '%s' "$list_json" | classify | tr '\n' ' ')"
-[[ "$got" == "legacy:a detached:b detached:c detached:d target:n " ]] \
-    || fail "classifier mishandled null/missing/(none)/target servers (got: '${got}')"
-echo "  index classifier handles null, missing, '(none)' and the target server OK"
+IFS=$'\t' read -r state _ connector \
+    < <(awk -F'\t' -v OFS='\t' '$1=="[srsx-target]"{print $2,$3,$4}' <<<"$topology") || true
+[[ "$state" == "ok" && "$connector" == "searchstax" ]] \
+    || fail "target-server verdict did not parse (state='${state}' connector='${connector}')"
+
+# No target line at all must not wedge the parser.
+state="" connector=""
+IFS=$'\t' read -r state _ connector \
+    < <(awk -F'\t' -v OFS='\t' '$1=="[srsx-target]"{print $2,$3,$4}' <<<"nothing here") || true
+[[ -z "$state" ]] || fail "a missing target line should leave the state empty (got: '${state}')"
+echo "  topology rows parse portably, including a missing target line OK"
 
 # --- a demo run must actually reach the copy path ----------------------------
 export SRSX_DEMO_HOME=/tmp/srsx-demo-home-index
