@@ -82,6 +82,30 @@ elseif (stripos((string) $connectors[$targetId], 'searchstax') === FALSE) {
   $targetState = 'wrong-connector';
 }
 
+// The verdict decides whether the index phase can run at all, so say it in
+// words rather than leaving it to be inferred from the server list above.
+switch ($targetState) {
+  case 'ok':
+    fwrite(STDOUT, "[topology] target server '{$targetId}': OK (SearchStax connector).\n");
+    break;
+
+  case 'missing':
+    fwrite(STDOUT, "[topology] target server '{$targetId}': MISSING — there is nothing to copy\n");
+    fwrite(STDOUT, "[topology]   onto. Run './srsx-migrate server --force' before the index phase.\n");
+    break;
+
+  case 'not-solr':
+    fwrite(STDOUT, "[topology] target server '{$targetId}': NOT A SOLR SERVER.\n");
+    fwrite(STDOUT, "[topology]   Re-create it with './srsx-migrate server --force'.\n");
+    break;
+
+  default:
+    fwrite(STDOUT, "[topology] target server '{$targetId}': WRONG CONNECTOR "
+      . "('" . $connectors[$targetId] . "', not searchstax).\n");
+    fwrite(STDOUT, "[topology]   It would accept a copy and index nowhere, so the index phase\n");
+    fwrite(STDOUT, "[topology]   refuses. Re-create it with './srsx-migrate server --force'.\n");
+}
+
 if ($utility) {
   $migrated = $utility->getMigratedServers();
   fwrite(STDOUT, '[topology] migrated_servers map (' . count($migrated) . "):\n");

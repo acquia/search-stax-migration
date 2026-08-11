@@ -37,8 +37,10 @@ if (!\Drupal::moduleHandler()->moduleExists('views')) {
 }
 
 $copied = [];
+$utility = NULL;
 if (\Drupal::hasService('solr_to_searchstax_ss_migration.utility')) {
-  $copied = \Drupal::service('solr_to_searchstax_ss_migration.utility')->getCopiedIndexes();
+  $utility = \Drupal::service('solr_to_searchstax_ss_migration.utility');
+  $copied = $utility->getCopiedIndexes();
 }
 
 $entityTypeManager = \Drupal::entityTypeManager();
@@ -58,6 +60,7 @@ $resolveIndex = function (string $base) use ($indexes): string {
 
 $rows = [];
 $reported = 0;
+$pending = 0;
 fwrite(STDOUT, "[list-migrated-views] Search API views on this site:\n");
 foreach ($entityTypeManager->getStorage('view')->loadMultiple() as $view) {
   $base = $view->get('base_table');
@@ -89,6 +92,13 @@ foreach ($entityTypeManager->getStorage('view')->loadMultiple() as $view) {
   elseif ($backend === 'search_api_db') {
     $action = 'leave (database search, not Acquia Search)';
   }
+  elseif ($utility && isset($servers[$serverId])
+    && $utility->isNonSearchStaxSolrServer($servers[$serverId])) {
+    // Acquia Search, and therefore in scope: it is only waiting on the copy.
+    $action = 'PENDING (Acquia Search — switches once the index phase copies '
+      . $indexId . ')';
+    $pending++;
+  }
   else {
     $action = 'leave (index not copied)';
   }
@@ -103,6 +113,12 @@ foreach ($entityTypeManager->getStorage('view')->loadMultiple() as $view) {
 
 if ($reported === 0) {
   fwrite(STDOUT, "[list-migrated-views]   (none)\n");
+}
+
+if ($pending > 0) {
+  fwrite(STDOUT, "[list-migrated-views] {$pending} view(s) are on Acquia Search and still have to move.\n");
+  fwrite(STDOUT, "[list-migrated-views]   They switch automatically once the index phase copies their\n");
+  fwrite(STDOUT, "[list-migrated-views]   index; leaving them behind would strand them on the old server.\n");
 }
 
 if (!$copied) {
