@@ -49,6 +49,7 @@ FILES=(
   "lib/php-eval/create-key-entity.php"
   "lib/php-eval/create-server.php"
   "lib/php-eval/import-config-yaml.php"
+  "lib/php-eval/inspect-index-topology.php"
   "lib/php-eval/inspect-service-class.php"
   "lib/php-eval/list-migrated-views.php"
   "lib/php-eval/switch-view-index.php"
@@ -68,7 +69,6 @@ FILES=(
   "lib/demo/fixtures/drush-config-get.json"
   "lib/demo/fixtures/drush-pm-list.json"
   "lib/demo/fixtures/composer-require.txt"
-  "lib/demo/fixtures/clone-index-result.txt"
   "lib/demo/fixtures/switch-view-result.txt"
   "templates/search_api.server.searchstax.yml.tmpl"
 )

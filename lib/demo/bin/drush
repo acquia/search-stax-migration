@@ -4,6 +4,9 @@
 set -euo pipefail
 
 FIX="${SRSX_DEMO_FIXTURES:-$(cd "$(dirname "$0")/../fixtures" && pwd)}"
+# Mutable run state lives outside the repo's fixtures dir.
+DSTATE="${SRSX_DEMO_STATE:-$FIX}"
+mkdir -p "$DSTATE"
 
 emit() {
   local f="$FIX/$1"
@@ -34,25 +37,21 @@ case "$sub" in
   sapi-sl|search-api:server-list)         emit drush-sapi-s.json ;;
   sapi-l|search-api:list)
     # The only command that reports which server an index is on.
-    if [[ -f "$FIX/.state-after-clone" ]]; then
+    if [[ -f "$DSTATE/.state-after-clone" ]]; then
       emit drush-sapi-list-after-copy.json
     else
       emit drush-sapi-list.json
     fi
     ;;
-  searchstax:copy-index)
-    echo "[success] Successfully created index SearchStax index (ID: searchstax_index)."
-    touch "$FIX/.state-after-clone"
-    ;;
-  searchstax:switch-view-index)
-    echo "[success] Switched view ${args[1]:-?} to its SearchStax index."
-    ;;
-  searchstax:validate-migrations)
-    echo "[success] All migrations validated."
+  searchstax:*)
+    # The toolkit deliberately calls the module's services directly instead of
+    # its drush commands, which only exist from searchstax 1.12.0.
+    echo "  There are no commands defined in the \"searchstax\" namespace." >&2
+    exit 1
     ;;
   sapi-s|search-api:status)
     # If a state file says "after-clone", return the post-clone variant.
-    if [[ -f "$FIX/.state-after-clone" ]]; then
+    if [[ -f "$DSTATE/.state-after-clone" ]]; then
       emit drush-sapi-i-after-clone.json
     else
       emit drush-sapi-i.json
@@ -74,7 +73,22 @@ case "$sub" in
   php:script)
     f="${args[1]:-}"
     case "$f" in
-      *clone-index.php)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
+      *clone-index.php)
+        # srsx-migrate passes the script's KEY=VALUE inputs as extra args in
+        # demo mode, so the shim can echo the same line the real script would.
+        idx="(unknown)"
+        for a in "${args[@]}"; do
+          [[ "$a" == SRSX_INDEX_ID=* ]] && idx="${a#SRSX_INDEX_ID=}"
+        done
+        echo "[clone-index] OK ${idx} -> searchstax_index"
+        touch "$DSTATE/.state-after-clone"
+        ;;
+      *inspect-index-topology.php)
+        echo "[topology] searchstax module version: 1.11.0"
+        echo "[topology] solr_to_searchstax_ss_migration: enabled"
+        echo "[topology]   acquia_search_server  backend=search_api_solr  connector=solr_cloud  legacy-solr=yes"
+        echo "[topology]   default_index  server(entity)='acquia_search_server'  server(raw config)='acquia_search_server'"
+        ;;
       *switch-view-index.php)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
       *list-migrated-views.php) echo "[list-migrated-views] view: srsx_demo_search"; echo "[list-migrated-views] 1 view(s) to switch." ;;
@@ -89,7 +103,7 @@ case "$sub" in
     # /*srsx-script:<name>*/ comment; dispatch on that.
     code="${args[1]:-}"
     case "$code" in
-      *"srsx-script:clone-index.php"*)        cat "$FIX/clone-index-result.txt" 2>/dev/null || echo "Cloned." ; touch "$FIX/.state-after-clone" ;;
+      *"srsx-script:clone-index.php"*)        echo "[clone-index] OK (demo) -> searchstax_index" ; touch "$DSTATE/.state-after-clone" ;;
       *"srsx-script:switch-view-index.php"*)  cat "$FIX/switch-view-result.txt" 2>/dev/null || echo "Updated views." ;;
       *"srsx-script:set-multisite-prefix.php"*) echo "[set-multisite-prefix] OK (demo)." ;;
       *"srsx-script:import-config-yaml.php"*) echo "[import-config-yaml] Imported (demo)." ;;

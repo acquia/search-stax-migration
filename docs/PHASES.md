@@ -107,30 +107,45 @@ If verification fails, prints the manual UI fallback URL and pauses.
 
 ## `index`
 
-For each Search-API index whose `server` is **not** `searchstax*`:
+Every index on the site is classified from `drush search-api:list --format=json`:
+
+| Class | `server` value | Action |
+| --- | --- | --- |
+| `target` | the SearchStax server id | skipped, already migrated |
+| `legacy` | any other server id | copied |
+| `detached` | empty or `(none)` | skipped unless `SRSX_COPY_DETACHED_INDEXES=1` |
+
+For each index to copy:
 
 ```bash
-SRSX_INDEX_ID=<id> SRSX_NEW_SERVER_ID=<server> drush php:eval <clone-index.php>
+SRSX_INDEX_ID=<id> SRSX_NEW_SERVER_ID=<server> drush php:script <clone-index.php>
 ```
 
-The PHP helper calls `\Drupal::service('solr_to_searchstax_ss_migration.utility')->cloneIndex($index, $server)` — the same code path the module's UI form uses. Falls back to `Index::createDuplicate()` if the service isn't present.
+The PHP helper calls `\Drupal::service('solr_to_searchstax_ss_migration.migration_helper')->createIndexCopy($index, $server_id)` — the same method behind the module's "Create copy" button and behind `drush searchstax:copy-index`. It is called directly rather than through that command because the command only exists from searchstax 1.12.0 and refuses any index whose current server is not registered in `migrated_servers`. If the submodule cannot be enabled at all, the helper falls back to the same field surgery by hand.
 
-Then for each new `*_searchstax` index:
+Re-running the phase is safe: an index already recorded in the module's `copied_indexes` map is skipped rather than copied again.
+
+Then for each index now on the SearchStax server:
 
 ```bash
-drush sapi-c <new>     # clear
-drush sapi-r <new>     # reset tracker
+drush sapi-rt <new>    # reset tracker
 drush sapi-i <new>     # index
+drush sapi-s <new>     # status
 ```
+
+If nothing ends up on the SearchStax server, the site is recorded as failed and the phase is left un-done. Run `./srsx-migrate doctor` to see what each index is actually attached to.
 
 ## `views`
 
 ```bash
-drush php:eval <switch-view-index.php>
+drush php:script <list-migrated-views.php>              # which views need switching
+SRSX_VIEW_ID=<view> drush php:script <switch-view-index.php>
 drush cr
 ```
 
-The PHP helper iterates every `views.view.*` config object and rewrites `display.<display>.display_options.query.options.index` from `<id>` to `<id>_searchstax`. It builds the rename map by looking at the `*_searchstax` indexes that exist on the SearchStax server, so it always matches whatever Phase `index` produced.
+`list-migrated-views.php` reads the module's own `copied_indexes` record (original id → copy id) rather than guessing from index names, then `switch-view-index.php` calls `MigrationHelper::switchViewToNewIndex()`, re-saves affected facets and adapts autocomplete searches — the same work `drush searchstax:switch-view-index` does, minus the interactive prompts, and without needing searchstax 1.12.0.
+
+A view that was already switched is skipped. If switching would newly break a views handler, the view is not saved and the site is recorded as failed.
 
 ## `route`
 

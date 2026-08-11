@@ -306,7 +306,7 @@ drush_php() {
     return 0
   fi
   if [[ "$DEMO" == "1" ]]; then
-    SRSX_AUDIT_OVERRIDE="$label" drush php:script "$remote_file"
+    SRSX_AUDIT_OVERRIDE="$label" drush php:script "$remote_file" "$@"
     return 0
   fi
 
@@ -350,6 +350,14 @@ drush_php() {
   fi
   (( phprc == 0 )) || err "${script} reported failure (code ${phprc}) on ${ACQUIA_APP}.${EFFECTIVE_ENV}. Output above."
   return 0
+}
+
+# drush_php_soft <script.php> [KEY=VAL ...] — same, but a failure returns
+# non-zero instead of ending the run. drush_php reports problems through err(),
+# which exits; the subshell keeps that exit local so a per-site phase can record
+# the failure and move on to the next site.
+drush_php_soft() {
+  ( drush_php "$@" )
 }
 
 # drush_cr — rebuild caches without letting a broken container abort the run.
@@ -815,6 +823,13 @@ enable_demo_mode() {
   mkdir -p "${demo_home}/config/sync"
   ( cd "$demo_home" && [[ ! -d .git ]] && command git init -q 2>/dev/null || true )
   REPO_ROOT="$demo_home"
+
+  # Where the shims record "the copy already happened". Kept out of the repo's
+  # fixtures dir so a demo run leaves no tracked files behind and the next run
+  # starts before the copy rather than after it.
+  export SRSX_DEMO_STATE="${demo_home}/demo-state"
+  rm -rf "$SRSX_DEMO_STATE"
+  mkdir -p "$SRSX_DEMO_STATE"
 
   # Rebase all runtime paths under the throwaway home so the wizard's saved
   # migration.env, state markers, logs, and artifacts all live there.
@@ -1529,7 +1544,11 @@ _phase_preflight_inventory() {
 
   # Module presence check (per site).
   if printf '%s' "$mods" | jq -e '.searchstax' >/dev/null 2>&1; then
-    ok "searchstax module already installed${DRUSH_URI:+ on ${DRUSH_URI}}."
+    local ssx_ver ssx_sub
+    ssx_ver="$(printf '%s' "$mods" | jq -r '.searchstax.version // "unknown"' 2>/dev/null || echo unknown)"
+    ok "searchstax module already installed${DRUSH_URI:+ on ${DRUSH_URI}} (version ${ssx_ver})."
+    ssx_sub="$(printf '%s' "$mods" | jq -r 'if .solr_to_searchstax_ss_migration then "enabled" else "not enabled" end' 2>/dev/null || echo unknown)"
+    info "  solr_to_searchstax_ss_migration: ${ssx_sub} — this is what performs the index copy."
   else
     info "searchstax module not yet installed${DRUSH_URI:+ on ${DRUSH_URI}}."
     SRSX_NEEDS_INSTALL=1
@@ -2060,59 +2079,29 @@ phase_index() {
   header "index" "${PHASE_DESC[index]}"
   if phase_done_check index; then phase_skip_done index; return 0; fi
   guard_against_prod
+  srsx_site_results_reset
   for_each_site _phase_index_site
-  phase_done_mark index
+  if srsx_site_summary "index"; then
+    phase_done_mark index
+  else
+    warn "Leaving 'index' un-done because at least one site failed; re-run after fixing."
+  fi
 }
 
+# The copy is made by lib/php-eval/clone-index.php, which calls the module's
+# MigrationHelper::createIndexCopy() — the same method behind the "Create copy"
+# button and behind `drush searchstax:copy-index`. We do NOT call that drush
+# command: it only exists from searchstax 1.12.0, and even there it refuses any
+# index whose current server is not in the module's migrated_servers map, which
+# includes every index that has no server at all.
 _phase_index_site() {
   local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
 
-  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
-    audit "drush search-api:list --format=json  # find indexes still on the legacy server"
-    audit "drush searchstax:copy-index <index>  # for each legacy index"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    audit "drush search-api:list --format=json  # classify indexes by server"
+    audit "drush php:script clone-index.php  # for each legacy index"
   else
-    # `search-api:status` reports only id/name/complete/indexed/total — the
-    # server lives in `search-api:list`, which is why filtering on status
-    # never matched anything.
-    local list_json
-    _drush_sapi_list list_json
-
-    local total legacy_ids
-    total=$(printf '%s' "$list_json" | jq -r 'length' 2>/dev/null || echo 0)
-    if [[ "$total" == "0" ]]; then
-      warn "This site has no Search API indexes at all, so there is nothing to copy."
-      info "  Create one first (Search API → Add index), point it at the legacy"
-      info "  Solr server, then re-run:  ./srsx-migrate index --force"
-      return 0
-    fi
-
-    info "Indexes on this site:"
-    printf '%s' "$list_json" \
-      | jq -r 'to_entries[] | "    \(.key)  →  server: \(.value.server // "(none)")"' 2>/dev/null || true
-
-    legacy_ids=$(printf '%s' "$list_json" \
-      | jq -r --arg new "$server_id" \
-          'to_entries[] | select((.value.server // "") != $new) | .key' 2>/dev/null || true)
-
-    if [[ -z "$legacy_ids" ]]; then
-      warn "Every index is already on '${server_id}'. Nothing to copy."
-      return 0
-    fi
-
-    # searchstax:copy-index is the module's own command: it uses
-    # MigrationHelper::createIndexCopy() and records the copy, which the view
-    # switch later relies on. It needs the legacy server to be registered as
-    # migrated, which phase 'server' does when it creates the SearchStax server.
-    local idx
-    while IFS= read -r idx; do
-      [[ -z "$idx" ]] && continue
-      info "Copying index '${idx}' → ${server_id}"
-      if ! drush searchstax:copy-index "$idx"; then
-        warn "  Could not copy '${idx}'."
-        warn "  'Migration is not supported for this index' means its server is not"
-        warn "  registered as migrated — re-run './srsx-migrate server --force' first."
-      fi
-    done <<< "$legacy_ids"
+    _phase_index_copy "$server_id" || return 0
   fi
 
   # Multisite: namespace each site's documents with a per-site index_prefix so
@@ -2129,7 +2118,7 @@ _phase_index_site() {
   drush_cr
 
   # Reindex whatever now sits on the SearchStax server.
-  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
     audit "drush sapi-rt <new>; drush sapi-i <new>; drush sapi-s <new>"
   else
     local after_json new_ids idx
@@ -2138,7 +2127,9 @@ _phase_index_site() {
       | jq -r --arg new "$server_id" \
           'to_entries[] | select((.value.server // "") == $new) | .key' 2>/dev/null || true)
     if [[ -z "$new_ids" ]]; then
-      warn "No index ended up on '${server_id}'. Nothing was indexed."
+      _srsx_site_fail "no index on '${server_id}' after copying"
+      warn "Nothing is on '${server_id}', so there is nothing to index."
+      warn "Run './srsx-migrate doctor' to see what each index is actually attached to."
       return 0
     fi
     while IFS= read -r idx; do
@@ -2153,6 +2144,104 @@ _phase_index_site() {
   ok "Index copy + reindex complete."
 }
 
+# Classify every index on this site and copy the ones that belong on SearchStax.
+# Returns non-zero when the site cannot proceed (module missing, no indexes).
+_phase_index_copy() {
+  local server_id="$1"
+
+  _ensure_migration_module || return 1
+
+  local list_json
+  _drush_sapi_list list_json
+
+  local total
+  total=$(printf '%s' "$list_json" | jq -r 'length' 2>/dev/null || echo 0)
+  if [[ "$total" == "0" ]]; then
+    _srsx_site_fail "no Search API indexes on this site"
+    warn "This site has no Search API indexes at all, so there is nothing to copy."
+    info "  Create one first (Search API → Add index), point it at the legacy"
+    info "  Solr server, then re-run:  ./srsx-migrate index --force"
+    return 1
+  fi
+
+  # search_api prints a localised "(none)" for an index with no server, so an
+  # unattached index has to be recognised by that string as well as by "".
+  local classified
+  classified=$(printf '%s' "$list_json" \
+    | jq -r --arg new "$server_id" '
+        to_entries[]
+        | (.value.server // "") as $s
+        | (if ($s == "" or $s == "(none)") then "detached"
+           elif $s == $new then "target"
+           else "legacy" end) as $cls
+        | "\($cls)\t\(.key)\t\($s)"' 2>/dev/null || true)
+
+  info "Indexes on this site:"
+  local cls idx srv
+  while IFS=$'\t' read -r cls idx srv; do
+    [[ -z "$idx" ]] && continue
+    info "    ${idx}  →  server: ${srv:-(none)}  [${cls}]"
+  done <<< "$classified"
+
+  local copied=0
+  while IFS=$'\t' read -r cls idx srv; do
+    [[ -z "$idx" ]] && continue
+    case "$cls" in
+      target)
+        info "Already on '${server_id}': ${idx}"
+        ;;
+      detached)
+        if [[ "${SRSX_COPY_DETACHED_INDEXES:-0}" == "1" ]]; then
+          site_step "copy detached index '${idx}'" \
+            drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}"
+          copied=1
+        else
+          warn "Skipping '${idx}': it is not attached to any server."
+          warn "  An index with no server was never serving search, so copying it is"
+          warn "  rarely what you want. Confirm with './srsx-migrate doctor' first; if"
+          warn "  it really should move, re-run with SRSX_COPY_DETACHED_INDEXES=1."
+        fi
+        ;;
+      *)
+        site_step "copy index '${idx}'" \
+          drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}"
+        copied=1
+        ;;
+    esac
+  done <<< "$classified"
+
+  if (( copied == 0 )); then
+    warn "No index was copied on this site."
+  fi
+  return 0
+}
+
+# The copy helper lives in solr_to_searchstax_ss_migration; without it we fall
+# back to hand-rolled config surgery that cannot record the old→new mapping the
+# 'views' phase reads, so enable it here rather than discover that later.
+_ensure_migration_module() {
+  local mods="{}"
+  drush_capture mods pm:list --type=module --status=enabled --format=json || mods="{}"
+  if printf '%s' "$mods" | jq -e '.solr_to_searchstax_ss_migration' >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "solr_to_searchstax_ss_migration is not enabled${DRUSH_URI:+ on ${DRUSH_URI}} — enabling it."
+  if drush en -y solr_to_searchstax_ss_migration; then
+    return 0
+  fi
+  _srsx_site_fail "could not enable solr_to_searchstax_ss_migration"
+  warn "Copies made without it cannot record the old→new index mapping that the"
+  warn "'views' phase depends on. Fix the module install and re-run:"
+  warn "  ./srsx-migrate index --force"
+  return 1
+}
+
+# Record a per-site failure without running a command (site_step wraps commands).
+_srsx_site_fail() {
+  SRSX_SITE_RESULTS+=("fail"$'\t'"${DRUSH_URI:-default}"$'\t'"$1")
+  SRSX_SITE_HAD_FAILURE=1
+}
+
 # =============================================================================
 # PHASE H — Views: switch every Search-API view to its new index
 # =============================================================================
@@ -2161,15 +2250,20 @@ phase_views() {
   header "views" "${PHASE_DESC[views]}"
   if phase_done_check views; then phase_skip_done views; return 0; fi
   guard_against_prod
+  srsx_site_results_reset
   for_each_site _phase_views_site
-  phase_done_mark views
+  if srsx_site_summary "views"; then
+    phase_done_mark views
+  else
+    warn "Leaving 'views' un-done because at least one site failed; re-run after fixing."
+  fi
 }
 
 _phase_views_site() {
   local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
-    audit "drush searchstax:switch-view-index <view>  # for each migrated view"
+    audit "drush php:script switch-view-index.php  # for each migrated view"
     drush_cr
     ok "Views switched to SearchStax-backed indexes."
     return 0
@@ -2188,12 +2282,13 @@ _phase_views_site() {
     return 0
   fi
 
+  # switch-view-index.php calls the same MigrationHelper methods as
+  # `drush searchstax:switch-view-index`, which only exists from 1.12.0.
   local view
   while IFS= read -r view; do
     [[ -z "$view" ]] && continue
-    info "Switching view '${view}' to its SearchStax index"
-    drush searchstax:switch-view-index "$view" \
-      || warn "  Could not switch view '${view}'."
+    site_step "switch view '${view}'" \
+      drush_php_soft switch-view-index.php "SRSX_VIEW_ID=${view}"
   done <<< "$view_ids"
 
   drush_cr
@@ -2436,6 +2531,28 @@ _phase_cleanup_site() {
 }
 
 # =============================================================================
+# DOCTOR — read-only topology dump (not a phase; never mutates anything)
+# =============================================================================
+
+run_doctor() {
+  header "doctor" "Report how Drupal sees the Search-API servers and indexes."
+  for_each_site _doctor_site
+  info ""
+  info "Read the 'server(entity)' and 'server(raw config)' columns together:"
+  info "  • both empty        → the index really is detached; nothing points it at Solr."
+  info "  • they differ       → a config override supplies the server, so drush and the"
+  info "                        web UI disagree and the module's copy form sees a"
+  info "                        different topology than this toolkit does."
+  info "  • legacy-solr=no on every server → nothing is registered as migratable, so"
+  info "                        'searchstax:copy-index' would refuse even on 1.12.0+."
+}
+
+_doctor_site() {
+  drush_php inspect-index-topology.php || \
+    warn "Could not inspect topology${DRUSH_URI:+ on ${DRUSH_URI}}."
+}
+
+# =============================================================================
 # DISPATCH
 # =============================================================================
 
@@ -2453,6 +2570,9 @@ ${C_BOLD}USAGE${C_RST}
   ./srsx-migrate validate --env <name>
                                    Read-only validation against any env (incl. prod).
   ./srsx-migrate status           Show "you are at <phase>; next: <phase>".
+  ./srsx-migrate doctor           Read-only: dump the Search-API server/index
+                                  topology per site (why an index shows no
+                                  server, what is registered as migrated).
   ./srsx-migrate explain <phase>  Print the Acquia doc URL the phase implements.
   ./srsx-migrate --help           This message.
   ./srsx-migrate --version        Show version and exit.
@@ -2601,6 +2721,7 @@ dispatch() {
       ensure_init
       "phase_validate"
       ;;
+    doctor)              ensure_init; run_doctor ;;
     status)              print_status ;;
     explain)             shift; print_explain "${1:-}" ;;
     --help|-h|help)      print_help ;;

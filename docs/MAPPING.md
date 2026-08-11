@@ -11,7 +11,7 @@ This page tracks the [official runbook](https://docs.acquia.com/acquia-cloud-pla
 | (SearchStax-side, no public Acquia doc — Studio SPA does this manually)                                                                       | `provision`       | `POST /experience-manager/v2/apps` (+ `GET /apps/<id>` for endpoint + tokens). Auto-skipped if endpoint already set or in `--demo` |
 | [Enabling the module + routing through SearchStudio](https://docs.acquia.com/acquia-cloud-platform/enabling-searchstax-module-and-routing-searches-through-it) (credentials prompt) | `configure`       | Interactive prompts for endpoint URL, tokens, analytics URL/key; Key module storage |
 | [Migrating the server](https://docs.acquia.com/acquia-cloud-platform/migrating-server-drupal-acquia-search-powered-searchstax)                | `server`          | Render YAML template → `drush php:eval <import-config-yaml.php>`                 |
-| [Migrating the index](https://docs.acquia.com/acquia-cloud-platform/migrating-index-drupal-acquia-search-powered-searchstax)                  | `index`           | `drush php:eval <clone-index.php>` calling `solr_to_searchstax_ss_migration.utility::cloneIndex()` |
+| [Migrating the index](https://docs.acquia.com/acquia-cloud-platform/migrating-index-drupal-acquia-search-powered-searchstax)                  | `index`           | `drush php:script <clone-index.php>` calling `solr_to_searchstax_ss_migration.migration_helper::createIndexCopy()` |
 | [Migrating the views](https://docs.acquia.com/acquia-cloud-platform/migrating-views-drupal-acquia-search-powered-searchstax)                  | `views`           | `drush php:eval <switch-view-index.php>` rewrites `views.view.*` config         |
 | [Enabling the module + routing through SearchStudio](https://docs.acquia.com/acquia-cloud-platform/enabling-searchstax-module-and-routing-searches-through-it) | `route`           | `drush cset searchstax.settings searches_via_searchstudio 1` (+ analytics)      |
 | [Multi-site, single SearchStax app](https://docs.acquia.com/acquia-cloud-platform/multi-site-configuration-single-searchstax-app)             | (per-site iteration via `SITES` env) | All mutating phases re-run with `drush --uri=<site>` for each entry in `SITES`. Sites are mapped to one or more SearchStax apps — see [Multisite → SearchStax apps](#multisite--searchstax-apps) |
@@ -26,7 +26,7 @@ This mapping was verified against `drupal/searchstax 1.11.0`. Specifically:
 
 - Module machine name: `searchstax` (not `searchstax_studio`)
 - Submodule: `solr_to_searchstax_ss_migration`
-- Service ID used by Phase `index`: `solr_to_searchstax_ss_migration.utility` → `cloneIndex()`
+- Service ID used by Phase `index`: `solr_to_searchstax_ss_migration.migration_helper` → `createIndexCopy()`. This is the single implementation behind both the "Create copy" button on `/admin/config/search/solr-to-searchstax-ss-migration` and the module's own `drush searchstax:copy-index`. The toolkit calls it directly rather than through that drush command, because the command only exists from 1.12.0 and refuses any index whose current server is not in the module's `migrated_servers` map.
 - Config object: `searchstax.settings`
 - Config keys (from `searchstax.schema.yml`): `searches_via_searchstudio`, `configure_via_searchstudio`, `analytics_url`, `analytics_key`, `key_id`
 

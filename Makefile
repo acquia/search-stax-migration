@@ -53,6 +53,7 @@ test:
 	@bash tests/test-phase-continues-onward.sh
 	@bash tests/test-cache-rebuild-resilient.sh
 	@bash tests/test-index-detection.sh
+	@bash tests/test-clone-index.sh
 
 demo:
 	@./srsx-migrate --demo

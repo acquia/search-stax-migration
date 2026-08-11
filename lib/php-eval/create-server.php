@@ -113,25 +113,38 @@ fwrite(STDOUT, "[create-server] host={$host} context={$context} core={$core} por
 fwrite(STDOUT, "[create-server] key_id: (none — credentials stored in config)\n");
 fwrite(STDOUT, "[create-server] Saved search_api.server.{$id}\n");
 
-// searchstax:copy-index only works for an index whose server is registered as
-// migrated (UtilityService::getMigratedServer), so record every legacy Solr
-// server as pointing at this one. Without this the command refuses with
-// "Migration is not supported for this index".
+// The module's UI decides what it can copy from this map, so register every
+// legacy Solr server as pointing at the new one. The toolkit's own copy step no
+// longer depends on it, but leaving it empty means the migration form at
+// /admin/config/search/solr-to-searchstax-ss-migration shows nothing to do.
 if (\Drupal::hasService('solr_to_searchstax_ss_migration.utility')) {
   $utility = \Drupal::service('solr_to_searchstax_ss_migration.utility');
+  $registered = 0;
   foreach ($storage->loadMultiple() as $existing) {
     if ($existing->id() === $id) {
       continue;
     }
     if ($utility->isNonSearchStaxSolrServer($existing)) {
       $utility->addMigratedServer($existing->id(), $id);
+      $registered++;
       fwrite(STDOUT, "[create-server] registered migration: {$existing->id()} -> {$id}\n");
     }
+    else {
+      $why = $existing->getBackendId() === 'search_api_solr'
+        ? 'already looks like a SearchStax Solr server'
+        : "backend is '{$existing->getBackendId()}', not Solr";
+      fwrite(STDOUT, "[create-server] not registered: {$existing->id()} ({$why})\n");
+    }
+  }
+  if ($registered === 0) {
+    fwrite(STDOUT, "[create-server] WARNING: no legacy Solr server was registered as migrated.\n");
+    fwrite(STDOUT, "[create-server]   The module's copy form will offer nothing. Run\n");
+    fwrite(STDOUT, "[create-server]   './srsx-migrate doctor' to see what servers exist here.\n");
   }
 }
 else {
   fwrite(STDOUT, "[create-server] NOTE: solr_to_searchstax_ss_migration is not enabled,\n");
-  fwrite(STDOUT, "[create-server]       so 'searchstax:copy-index' will not be available.\n");
+  fwrite(STDOUT, "[create-server]       so index copies cannot record the old -> new mapping.\n");
 }
 
 if ($token === '') {

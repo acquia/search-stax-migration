@@ -47,6 +47,6 @@ while IFS= read -r s; do
         || { echo "FAIL: srsx-migrate calls drush_php ${s} but lib/php-eval/${s} is missing"; exit 1; }
     grep -qxF "lib/php-eval/${s}" "$work/manifest.txt" \
         || { echo "FAIL: drush_php ${s} is not in the install.sh FILES manifest"; exit 1; }
-done < <(grep -oE 'drush_php [a-z0-9-]+\.php' srsx-migrate | awk '{print $2}' | sort -u)
+done < <(grep -oE 'drush_php(_soft)? [a-z0-9-]+\.php' srsx-migrate | awk '{print $2}' | sort -u)
 
 echo "OK: install.sh manifest matches the repo ($(wc -l < "$work/manifest.txt" | tr -d ' ') files)."

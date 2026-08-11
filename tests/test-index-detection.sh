@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 # tests/test-index-detection.sh
 #
-# The index phase found nothing on a real migration:
+# Two regressions guard this phase.
 #
-#   jq: error (at <stdin>:29): startswith() requires string inputs
-#   [WARN] No legacy (non-SearchStax) indexes found. Nothing to clone.
+# 1. It once filtered `search-api:status` on `.value.server`, but that command
+#    reports only id/name/complete/indexed/total — CommandHelper::indexStatusCommand
+#    never returns a server. `search-api:list` (indexListCommand) is the one with
+#    'server'. So the filter compared against null, jq errored, and every index
+#    was silently skipped.
 #
-# Cause: it filtered `search-api:status` on `.value.server`, but that command
-# reports only id/name/complete/indexed/total — CommandHelper::indexStatusCommand
-# never returns a server. `search-api:list` (indexListCommand) is the one with
-# 'server'. So the filter compared against null, jq errored, and every index was
-# silently skipped.
+# 2. It then copied indexes with `drush searchstax:copy-index`, which only
+#    exists from searchstax 1.12.0 and, even there, refuses any index whose
+#    current server is not registered in the module's migrated_servers map:
+#
+#      There are no commands defined in the "searchstax" namespace.
+#      Migration is not supported for this index.
+#
+#    The copy now goes through lib/php-eval/clone-index.php, which calls
+#    MigrationHelper::createIndexCopy() — the single implementation behind both
+#    that command and the module's "Create copy" button.
 #
 # Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
 
@@ -26,7 +34,8 @@ grep -q '_drush_sapi_list() {' srsx-migrate \
 grep -q 'search-api:list --format=json' srsx-migrate \
     || fail "_drush_sapi_list must call search-api:list"
 
-fn="$(sed -n '/^_phase_index_site()/,/^}/p' srsx-migrate)"
+fn="$(sed -n '/^_phase_index_copy()/,/^}/p' srsx-migrate)"
+[[ -n "$fn" ]] || fail "no _phase_index_copy function in srsx-migrate"
 grep -q '_drush_sapi_list' <<<"$fn" \
     || fail "the index phase still does not consult search-api:list"
 if grep -q '_drush_sapi_indexes' <<<"$fn"; then
@@ -38,6 +47,43 @@ if grep -q 'startswith("searchstax")' <<<"$fn"; then
 fi
 echo "  index phase reads the server from search-api:list OK"
 
+# --- copies go through the module's service, not its drush command ------------
+# Comment lines are stripped: the code explains why those commands are avoided.
+code="$(grep -vE '^[[:space:]]*#' srsx-migrate)"
+if grep -q 'drush searchstax:copy-index' <<<"$code"; then
+    fail "index phase still calls searchstax:copy-index (missing before module 1.12.0)"
+fi
+if grep -q 'drush searchstax:switch-view-index' <<<"$code"; then
+    fail "views phase still calls searchstax:switch-view-index (missing before module 1.12.0)"
+fi
+grep -qE 'drush_php(_soft)? clone-index\.php' srsx-migrate \
+    || fail "index phase must copy via drush_php clone-index.php"
+grep -qE 'drush_php(_soft)? switch-view-index\.php' srsx-migrate \
+    || fail "views phase must switch via drush_php switch-view-index.php"
+grep -q 'createIndexCopy' lib/php-eval/clone-index.php \
+    || fail "clone-index.php must call MigrationHelper::createIndexCopy()"
+grep -q 'switchViewToNewIndex' lib/php-eval/switch-view-index.php \
+    || fail "switch-view-index.php must call MigrationHelper::switchViewToNewIndex()"
+# cloneIndex() does not exist on any searchstax release; it was a phantom API.
+if grep -q 'cloneIndex' lib/php-eval/clone-index.php; then
+    fail "clone-index.php calls UtilityService::cloneIndex(), which does not exist"
+fi
+# Copies are named searchstax_index…, never <original>_searchstax, so the view
+# switch must read the module's recorded mapping instead of guessing names.
+grep -q 'getCopiedIndexes' lib/php-eval/switch-view-index.php \
+    || fail "switch-view-index.php must resolve the new index from getCopiedIndexes()"
+if grep -qF "=== '_searchstax'" lib/php-eval/switch-view-index.php; then
+    fail "switch-view-index.php still guesses '<original>_searchstax' index names"
+fi
+grep -q 'getCopiedIndexes' lib/php-eval/clone-index.php \
+    || fail "clone-index.php must skip an index that was already copied"
+echo "  copies use the module's own service, and are idempotent OK"
+
+# --- the server mapping still gets registered for the module UI --------------
+grep -q 'addMigratedServer' lib/php-eval/create-server.php \
+    || fail "create-server.php must register the legacy server as migrated"
+echo "  legacy server is registered as migrated OK"
+
 # --- a null/missing server must never abort the filter -----------------------
 command -v jq >/dev/null 2>&1 || { echo "  (jq missing — skipping filter check)"; exit 0; }
 
@@ -47,35 +93,26 @@ if printf '%s' "$status_json" | jq -e 'to_entries[] | select(.value.server | sta
     fail "expected the old filter to be broken against real status output"
 fi
 
-# The filter actually used must tolerate a missing or null server.
-list_json='{"a":{"id":"a","server":"acquia_search_server"},"b":{"id":"b","server":null},"c":{"id":"c"}}'
-got="$(printf '%s' "$list_json" \
-    | jq -r --arg new "searchstax_server" \
-        'to_entries[] | select((.value.server // "") != $new) | .key' 2>/dev/null | tr '\n' ' ')"
-[[ "$got" == "a b c " ]] \
-    || { echo "FAIL: legacy filter mishandled a null/missing server (got: '${got}')"; exit 1; }
+# The classifier must split target / legacy / detached, and treat the localised
+# "(none)" that search_api prints for an unattached index as detached — not as
+# a legacy server named "(none)".
+classify() {
+    jq -r --arg new "searchstax_server" '
+      to_entries[]
+      | (.value.server // "") as $s
+      | (if ($s == "" or $s == "(none)") then "detached"
+         elif $s == $new then "target"
+         else "legacy" end) as $cls
+      | "\($cls):\(.key)"'
+}
 
-# And it must exclude indexes already on the SearchStax server.
-list_json='{"a":{"server":"acquia_search_server"},"n":{"server":"searchstax_server"}}'
-got="$(printf '%s' "$list_json" \
-    | jq -r --arg new "searchstax_server" \
-        'to_entries[] | select((.value.server // "") != $new) | .key' 2>/dev/null | tr '\n' ' ')"
-[[ "$got" == "a " ]] \
-    || { echo "FAIL: filter did not exclude indexes already migrated (got: '${got}')"; exit 1; }
+list_json='{"a":{"server":"acquia_search_server"},"b":{"server":null},"c":{},"d":{"server":"(none)"},"n":{"server":"searchstax_server"}}'
+got="$(printf '%s' "$list_json" | classify | tr '\n' ' ')"
+[[ "$got" == "legacy:a detached:b detached:c detached:d target:n " ]] \
+    || fail "classifier mishandled null/missing/(none)/target servers (got: '${got}')"
+echo "  index classifier handles null, missing, '(none)' and the target server OK"
 
-echo "  legacy filter tolerates null/missing server OK"
-
-# --- copies are made by the module's own command ------------------------------
-grep -q 'drush searchstax:copy-index' srsx-migrate \
-    || fail "index phase must use the module's searchstax:copy-index command"
-grep -q 'drush searchstax:switch-view-index' srsx-migrate \
-    || fail "views phase must use the module's searchstax:switch-view-index command"
-# copy-index refuses unless the old server is registered as migrated.
-grep -q 'addMigratedServer' lib/php-eval/create-server.php \
-    || fail "create-server.php must register the legacy server as migrated, or copy-index refuses"
-echo "  module drush commands are used, with the server mapping registered OK"
-
-# --- a demo run must actually reach those commands ----------------------------
+# --- a demo run must actually reach the copy path ----------------------------
 export SRSX_DEMO_HOME=/tmp/srsx-demo-home-index
 rm -rf "$SRSX_DEMO_HOME"
 LOG=/tmp/srsx-index.log
@@ -83,9 +120,19 @@ DEMO_ANSWERS="demoapp,dev,n,,main,https://h.searchstax.com/29847/core1/update,rt
     ./srsx-migrate --demo all </dev/null >"$LOG" 2>&1 \
     || fail "demo run exited non-zero" "$LOG"
 
-grep -q "searchstax:copy-index" "$LOG"        || fail "copy-index was never invoked" "$LOG"
-grep -q "searchstax:switch-view-index" "$LOG" || fail "switch-view-index was never invoked" "$LOG"
-grep -q "Nothing to clone" "$LOG"             && fail "indexes were still not detected" "$LOG"
+grep -q 'clone-index' "$LOG"       || fail "clone-index was never invoked" "$LOG"
+grep -q 'switch-view-index' "$LOG" || fail "switch-view-index was never invoked" "$LOG"
+grep -q 'Nothing to clone' "$LOG"  && fail "indexes were still not detected" "$LOG"
+grep -q 'no commands defined' "$LOG" \
+    && fail "a searchstax:* drush command was still called" "$LOG"
 
+# The demo must exercise the real classification, not just print audit lines.
+grep -q '\[legacy\]' "$LOG" \
+    || fail "demo run never classified an index — the copy path was skipped" "$LOG"
 echo "  demo run copies indexes and switches views OK"
+
+# A demo run must not leave state behind in the repo's fixtures dir.
+[[ -e lib/demo/fixtures/.state-after-clone ]] \
+    && fail "demo run wrote .state-after-clone into the repo fixtures dir"
+
 echo "  index-detection OK"
