@@ -108,13 +108,16 @@ case "$sub" in
         ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
       *list-migrated-views.php)
+        echo "[list-migrated-views] Search API views on this site:"
+        echo "[list-migrated-views]   srsx_demo_search  index=default_index  server=acquia_search_server  backend=search_api_solr  base_table=search_api_index_default_index  => SWITCH -> searchstax_index"
+        echo "[list-migrated-views]   srsx_demo_news  index=default_index  server=acquia_search_server  backend=search_api_solr  base_table=search_api_index_default_index  => SWITCH -> searchstax_index"
+        echo "[list-migrated-views]   srsx_demo_events  index=default_index  server=acquia_search_server  backend=search_api_solr  base_table=search_api_index_default_index  => SWITCH -> searchstax_index"
+        echo "[list-migrated-views]   srsx_demo_media  index=media_library  server=database_server  backend=search_api_db  base_table=search_api_index_media_library  => leave (database search, not Acquia Search)"
         echo "[list-migrated-views] copied indexes: default_index -> searchstax_index"
-        echo "[list-migrated-views] view: srsx_demo_search  base_table=search_api_index_default_index  default_index -> searchstax_index"
-        echo "[list-migrated-views] view: srsx_demo_news  base_table=search_api_index_default_index  default_index -> searchstax_index"
-        echo "[list-migrated-views] view: srsx_demo_events  base_table=search_api_index_default_index  default_index -> searchstax_index"
-        echo "[list-migrated-views] other Search API views, left alone (1):"
-        echo "[list-migrated-views]   srsx_demo_media (search_api_index_media_library)"
         echo "[list-migrated-views] 3 view(s) to switch."
+        for a in "${args[@]}"; do
+          [[ "$a" == SRSX_REPORT_ONLY=1 ]] && exit 0
+        done
         printf '[srsx-view]\tsrsx_demo_search\tsearch_api_index_default_index\tdefault_index\tsearchstax_index\n'
         printf '[srsx-view]\tsrsx_demo_news\tsearch_api_index_default_index\tdefault_index\tsearchstax_index\n'
         printf '[srsx-view]\tsrsx_demo_events\tsearch_api_index_default_index\tdefault_index\tsearchstax_index\n'

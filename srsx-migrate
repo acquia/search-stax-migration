@@ -2648,6 +2648,11 @@ run_doctor() {
   info "  • [detached] no server at all → left alone; it was never serving search."
   info "  Force either of the last two with:  SRSX_COPY_INDEXES='<id> <id>'"
   info ""
+  info "  A view's index comes from its base_table, which no display can override,"
+  info "  so the view list above shows the index, server and backend behind each"
+  info "  one. Views whose backend is search_api_db are database search and are"
+  info "  left alone. Restrict the switch set with:  SRSX_SWITCH_VIEWS='<id> <id>'"
+  info ""
   info "  server(entity) vs server(raw config) differing means a config override"
   info "  supplies the server, so drush and the web UI see different topologies."
   info "  An empty migrated_servers map only affects the module's own UI form —"
@@ -2659,6 +2664,9 @@ _doctor_site() {
       "SRSX_SERVER_ID=${SRSX_NEW_SERVER_ID:-searchstax_server}" \
     | grep -v '^\[srsx-' \
     || warn "Could not inspect topology${DRUSH_URI:+ on ${DRUSH_URI}}."
+  drush_php_soft list-migrated-views.php "SRSX_REPORT_ONLY=1" \
+    | grep -v '^\[srsx-' \
+    || warn "Could not inventory views${DRUSH_URI:+ on ${DRUSH_URI}}."
 }
 
 # =============================================================================

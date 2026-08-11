@@ -148,7 +148,14 @@ SRSX_VIEW_ID=<view> drush php:script <switch-view-index.php>
 drush cr
 ```
 
-A view's index is decided by its `base_table` (`search_api_index_<id>` or `search_api_datasource_<id>_<datasource>`), so that is what `list-migrated-views.php` matches against the module's `copied_indexes` record — never a guess from index names. It prints the `base_table` of every view it selects **and** of every other Search API view it leaves alone, so "that view isn't really on Acquia Search" can be checked against config rather than argued about. Set `SRSX_SWITCH_VIEWS='<id> <id>'` to switch only some of them.
+A view's index is decided by its `base_table` (`search_api_index_<id>` or `search_api_datasource_<id>_<datasource>`) and no display can override it, so `list-migrated-views.php` inventories **every** Search API view with the index, server and backend behind it, and the action it will take:
+
+```
+srsx_demo_search  index=default_index  server=acquia_search_server  backend=search_api_solr  => SWITCH -> searchstax_index
+srsx_demo_media   index=media_library  server=database_server       backend=search_api_db    => leave (database search, not Acquia Search)
+```
+
+Only views on an index recorded in `copied_indexes` are switched, so database-backed search views are left alone by construction. The same inventory is printed read-only by `./srsx-migrate doctor`. Set `SRSX_SWITCH_VIEWS='<id> <id>'` to switch only some of the eligible ones.
 
 `switch-view-index.php` prefers `MigrationHelper::switchViewToNewIndex()`, and re-saves affected facets and adapts autocomplete searches. That service only exists on newer releases — searchstax 1.9.x ships the submodule with `solr_to_searchstax_ss_migration.utility` as its only service — so the same rewrite is also implemented inline: `base_table` is repointed and every nested `table` key naming the old index is rewritten. A view that was already switched is skipped.
 
