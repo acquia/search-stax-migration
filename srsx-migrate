@@ -706,7 +706,7 @@ ask_choice() {
   local i=1
   for o in "${opts[@]}"; do
     printf '    [%d] %s\n' "$i" "$o"
-    ((i++))
+    i=$((i + 1))
   done
   local selected_index
   if (( ${#DEMO_ANSWERS_ARR[@]} > 0 )); then
@@ -1059,7 +1059,7 @@ resume_or_select() {
       next="${PHASE_ORDER[$((i+1))]:-}"
       break
     fi
-    ((++i))
+    i=$((i + 1))
   done
 
   if [[ -z "$next" ]]; then
@@ -2040,7 +2040,7 @@ _verify_searchstax_creds() {
 
   local tries=0
   while :; do
-    (( tries++ ))
+    tries=$((tries + 1))
     info "Verifying SearchStax credentials (app ${k})…"
     audit "curl -o <response> -w %{http_code} -s -S --max-time 10 -H 'Authorization: Token ***' '${test_url}'"
 
@@ -2932,7 +2932,7 @@ print_status() {
       info "Run:                  ./srsx-migrate ${next}"
       return 0
     fi
-    ((++i))
+    i=$((i + 1))
   done
 }
 

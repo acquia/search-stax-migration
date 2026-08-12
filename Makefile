@@ -35,6 +35,7 @@ lint:
 check: lint
 	@bash tests/check-config-keys.sh
 	@bash tests/check-install-manifest.sh
+	@bash tests/check-arith-increment.sh
 
 test:
 	@rm -rf state/ artifacts/ logs/ /tmp/srsx-demo-home-mtest
