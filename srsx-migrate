@@ -2000,6 +2000,9 @@ _configure_one_app() {
   # Keep rt in sync with wt so the rest of the script never reads an empty value
   # via ssx_app_field / _ssx_update_token.
   rt="$wt"
+
+  _verify_searchstax_creds "$ep" "$wt" "$k"
+
   _persist_app_creds "$k" "$ep" "$rt" "$wt" "$au"
   # Show how the endpoint will be split for search_api_solr so a wrong paste is
   # obvious now rather than at 'server' time.
@@ -2018,8 +2021,85 @@ _configure_one_app() {
   return 0
 }
 
-# Preserve secrets in-memory only; only non-secret values are persisted.
-# If the file doesn't exist, create it. If the key isn't present, append it.
+# Verify that an endpoint URL and token can actually reach SearchStax. Hits the
+# Solr /select endpoint with rows=0 and the correct Authorization header. If the
+# check fails the user is offered a chance to re-enter both values rather than
+# continuing with credentials that will silently fail later at 'server' time.
+#
+# The SearchStax connector sends: Authorization: Token <token>  (not Bearer).
+# A correct response is HTTP 200 with JSON containing a "response" or "error"
+# key; a 401/403 means the token is wrong; anything else likely means the URL
+# is wrong.
+_verify_searchstax_creds() {
+  local ep="$1" tok="$2" k="$3"
+  [[ "$DEMO" == "1" || "$DRY_RUN" == "1" ]] && return 0
+  [[ -z "$ep" || -z "$tok" ]] && return 0
+
+  _ssx_parse_endpoint "$ep"
+  local test_url="https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/select?q=*:*&rows=0&wt=json"
+
+  local tries=0
+  while :; do
+    (( tries++ ))
+    info "Verifying SearchStax credentials (app ${k})…"
+    audit "curl -o <response> -w %{http_code} -s -S --max-time 10 -H 'Authorization: Token ***' '${test_url}'"
+
+    local http_out http_code
+    http_out="$(command curl -o - -w '\n%{http_code}' -s -S --max-time 10 \
+      -H "Authorization: Token ${tok}" \
+      "${test_url}" 2>&1)" || http_out="CURL_ERROR"
+
+    if [[ "$http_out" == "CURL_ERROR" ]]; then
+      http_code="CURL_ERROR"
+    else
+      http_code="$(printf '%s' "$http_out" | tail -1)"
+    fi
+
+    case "$http_code" in
+      200)
+        ok "SearchStax credentials verified (HTTP 200)."
+        return 0
+        ;;
+      401|403)
+        warn "Authentication failed (HTTP ${http_code}) — the token is likely wrong."
+        ;;
+      404)
+        warn "HTTP 404 — the endpoint URL may be wrong (core not found)."
+        info "  Parsed as: host=${SRSX_EP_HOST} context=${SRSX_EP_CONTEXT} core=${SRSX_EP_CORE}"
+        info "  URL tried: ${test_url}"
+        ;;
+      CURL_ERROR)
+        warn "Could not reach ${SRSX_EP_HOST} — check the URL and your network."
+        ;;
+      *)
+        warn "Unexpected HTTP ${http_code} from ${SRSX_EP_HOST}."
+        info "  Response: $(printf '%s' "$http_out" | head -3)"
+        ;;
+    esac
+
+    if (( tries >= 3 )); then
+      err "SearchStax credentials could not be verified after ${tries} attempts.
+       Check the endpoint URL and token in SearchStudio, then re-run:
+         ./srsx-migrate configure --force"
+    fi
+
+    local retry_choice
+    ask_choice "What would you like to do?" retry_choice \
+      "re-enter the endpoint URL and token and try again" \
+      "continue anyway (the 'server' phase will fail later if these are wrong)"
+    case "$retry_choice" in
+      continue*|Continue*)
+        warn "Continuing with unverified credentials."
+        return 0
+        ;;
+    esac
+
+    ask_saved "SearchStax App endpoint URL" ep
+    ask_saved "SearchStax read & write token" tok
+    _ssx_parse_endpoint "$ep"
+    test_url="https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/select?q=*:*&rows=0&wt=json"
+  done
+}
 _save_env_var() {
   local key="$1" val="$2"
   local envfile="$ENV_FILE"
