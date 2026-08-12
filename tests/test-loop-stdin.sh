@@ -75,7 +75,7 @@ echo "  no phase drives environment commands from a redirected read loop OK"
 export SRSX_DEMO_HOME=/tmp/srsx-demo-home-loop
 rm -rf "$SRSX_DEMO_HOME"
 LOG=/tmp/srsx-loop.log
-DEMO_ANSWERS="demoapp,dev,n,,main,https://h.searchstax.com/29847/core1/update,wt,,1" \
+DEMO_ANSWERS="demoapp,dev,n,1,,main,https://h.searchstax.com/29847/core1/update,wt,,1" \
     ./srsx-migrate --demo all </dev/null >"$LOG" 2>&1 \
     || { echo "FAIL: demo run exited non-zero"; tail -30 "$LOG"; exit 1; }
 

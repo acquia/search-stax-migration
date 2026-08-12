@@ -143,7 +143,7 @@ echo "  topology rows parse portably, including a missing target line OK"
 export SRSX_DEMO_HOME=/tmp/srsx-demo-home-index
 rm -rf "$SRSX_DEMO_HOME"
 LOG=/tmp/srsx-index.log
-DEMO_ANSWERS="demoapp,dev,n,,main,https://h.searchstax.com/29847/core1/update,wt,,1" \
+DEMO_ANSWERS="demoapp,dev,n,1,,main,https://h.searchstax.com/29847/core1/update,wt,,1" \
     ./srsx-migrate --demo all </dev/null >"$LOG" 2>&1 \
     || fail "demo run exited non-zero" "$LOG"
 

@@ -97,9 +97,20 @@ ssx_http() {
   cat "$tmp"
   local detail=""
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-    # Best-effort extraction of a server-side error message.
-    detail="$(jq -r '.detail // .message // .error // ""' < "$tmp" 2>/dev/null || true)"
+    # This is Django REST Framework: a rejected login comes back as HTTP 400
+    # with {"non_field_errors":[...]}, and per-field problems as
+    # {"<field>":[...]} — none of which are 'detail'/'message'/'error'.
+    detail="$(jq -r '
+      if type != "object" then ""
+      else
+        (.detail? // .message? // .error? // empty) //
+        ([paths(type == "array") as $p | "\($p|join(".")): \(getpath($p)|map(tostring)|join("; "))"] | join(" | "))
+      end' < "$tmp" 2>/dev/null || true)"
     warn "HTTP $code on $method $url${detail:+ — $detail}"
+    # Print what the server actually said; without it a 400 is unactionable.
+    local raw
+    raw="$(tr -d '\n' < "$tmp" 2>/dev/null | head -c 400 || true)"
+    [[ -n "$raw" && "$raw" != "$detail" ]] && warn "  response: ${raw}"
     rm -f "$tmp"
     return 1
   fi
@@ -205,8 +216,19 @@ ssx_login() {
     || err "Failed to build SearchStax login body"
 
   local resp
-  resp="$(ssx_http POST "$SSX_API_V2/obtain-auth-token/" "$body")" \
-    || err "SearchStax login failed. Check credentials / 2FA token."
+  resp="$(ssx_http POST "$SSX_API_V2/obtain-auth-token/" "$body")" || {
+    warn "SearchStax rejected the login for '${SEARCHSTAX_USER}'."
+    warn "  The response above is what SearchStax said. Common causes:"
+    warn "    • the account signs in with SSO, so it has no API password;"
+    warn "    • 2FA is enabled and the code was blank, expired, or mistyped;"
+    warn "    • the password is for SearchStudio rather than app.searchstax.com."
+    warn "  Confirm the same credentials work at https://app.searchstax.com/ first."
+    warn "  You can skip this entirely: answer 'no' to app creation and paste the"
+    warn "  endpoint and token in the 'configure' phase."
+    # Do not keep a bad answer for the retry.
+    SEARCHSTAX_USER=""; SEARCHSTAX_PASS=""; unset SEARCHSTAX_2FA
+    return 1
+  }
   SSX_TOKEN="$(jq -r '.token // empty' <<<"$resp")" \
     || err "Could not parse SearchStax login response"
   [[ -n "$SSX_TOKEN" ]] || err "SearchStax login response had no 'token' field"

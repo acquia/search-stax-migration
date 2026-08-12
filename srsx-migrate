@@ -1605,8 +1605,21 @@ This phase mirrors the Acquia walkthrough video for the install step:
 If this is your first migration, watch the video once before continuing —
 it shows exactly what the steps below do in the Acquia UI.
 
+It runs composer, commits and pushes a branch, waits for you to deploy it,
+then enables the modules on every site. Skip it if the modules are already
+installed and deployed on ${ACQUIA_APP}.${EFFECTIVE_ENV}.
+
 EOF
-  confirm "Ready to require the SearchStax + Search-API modules in composer?"
+  local install_choice
+  ask_choice "Run the install phase now?" install_choice \
+    "yes — require the modules, push, deploy, and enable them" \
+    "skip — the modules are already installed and deployed"
+  case "$install_choice" in
+    skip*|Skip*)
+      info "Skipping install. Re-run './srsx-migrate install' if the modules turn out to be missing."
+      return 0
+      ;;
+  esac
 
   _ensure_tools_gitignore
 
@@ -1837,7 +1850,13 @@ phase_provision() {
   require_cmd jq
   require_cmd curl
 
-  ssx_login
+  if ! ssx_login; then
+    warn "Continuing without creating an app."
+    info "Create the app in SearchStax Studio (or ask your SearchStax contact),"
+    info "then paste its endpoint and token when 'configure' asks."
+    phase_done_mark provision
+    return 0
+  fi
   ssx_pick_account
   ssx_pick_environment
   ssx_pick_region
