@@ -121,3 +121,29 @@ fi
     || { echo "FAIL: token not parsed from ssx_http output (got: $resp)"; exit 1; }
 
 echo "  ssx_http keeps its trace output off stdout OK"
+
+# --- plan_regions must parse the shape the API actually returns --------------
+# Real response, captured from a live account:
+#   {"success":true,"plans":[{"sku":..,"name":..,"plan_regions":[{id,region_served}]}]}
+# The previous parser looked for a top-level array or a "regions" key, found
+# neither, and dropped the operator into "Enter the plan_region_id manually".
+SSX_REGION_ID=""
+SSX_ACCOUNT="Test_Account"
+plan_regions_json='{"success":true,"plans":[{"sku":"AQ-PREMIUM","name":"Acquia Search","plan_regions":[{"id":281,"region_served":"Frankfurt, DE","region__region_id":7},{"id":276,"region_served":"North Virginia, US","region__region_id":11}]}]}'
+
+curl() {
+    local -a a=("$@")
+    local i out=""
+    for ((i = 0; i < ${#a[@]}; i++)); do
+        [[ "${a[i]}" == "-o" ]] && out="${a[i + 1]}"
+    done
+    [[ -n "$out" ]] && printf '%s' "$plan_regions_json" > "$out"
+    printf '200'
+}
+
+# Non-TTY, so ssx_pick_region takes the first parsed region rather than prompting.
+ssx_pick_region < /dev/null > /dev/null 2>&1 || true
+[[ "$SSX_REGION_ID" == "281" ]] \
+    || { echo "FAIL: plan_regions not parsed (SSX_REGION_ID='${SSX_REGION_ID}')"; exit 1; }
+
+echo "  plan_regions parses the real API response OK"

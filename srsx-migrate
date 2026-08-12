@@ -1860,6 +1860,7 @@ phase_provision() {
   ssx_pick_account
   ssx_pick_environment
   ssx_pick_region
+  ssx_pick_platform_version
 
   # One default app name per app (group). Single-app installs get one name.
   local -a default_names=()

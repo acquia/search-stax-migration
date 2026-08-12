@@ -299,24 +299,17 @@ ssx_pick_region() {
 
   local table
   table="$(jq -r '
-    def to_list:
-      if type == "array" then .
-      elif type == "object" then
-        if .results then .results
-        elif .data    then .data
-        else [ .[] | select(type=="array") ] | add // []
-        end
-      else [] end;
-    def expand_plans:
-      map(
-        if type == "object" and (.regions? | type) == "array" then
-          (.plan_name // .name // .label // "") as $p
-          | .regions | map(. + {_plan: $p})
-        else [.] end
-      ) | add // [];
-    to_list
-    | expand_plans
-    | map(select(type=="object" and (.id != null)))
+    # Real shape: {"plans":[{"sku":..,"name":..,"plan_regions":[{id,region_served}]}]}
+    # Anything else falls back to a recursive hunt for objects that carry both
+    # an id and a region label.
+    ( [ (.plans // [])[]
+        | (.name // .sku // "") as $p
+        | (.plan_regions // .regions // [])[]
+        | . + {_plan: $p} ] ) as $viaPlans
+    | (if ($viaPlans | length) > 0 then $viaPlans
+       else [ .. | objects
+              | select((.id? != null) and ((.region_served? // .region? // .name?) != null)) ]
+       end)
     | .[]
     | [
         (.id | tostring),
@@ -363,6 +356,118 @@ ssx_pick_region() {
     fi
     info "Enter a number 1..${#ids[@]}"
   done
+}
+
+# --- Platform / version --------------------------------------------------
+#
+# SearchStudio's create-app form has a Platform selector (Custom App, Drupal,
+# Adobe Experience Manager) plus a Version, and the API carries that pair as a
+# single `platform_version_id`. Creating an app without it produces a generic
+# collection, which is how a brand-new app ends up on the stock
+# "default-config" Solr schema that no Drupal query can use.
+#
+# The listing endpoint is not documented to us, so candidates are probed
+# read-only and anything unrecognised falls through to manual entry.
+ssx_pick_platform_version() {
+  if [[ -n "${SSX_PLATFORM_VERSION_ID:-}" ]]; then
+    ok "SearchStax platform_version_id '$SSX_PLATFORM_VERSION_ID' (pre-set)"
+    return 0
+  fi
+
+  local acct resp="" path
+  acct="$(ssx_urlenc "$SSX_ACCOUNT")"
+  for path in \
+    "$SSX_API_EM_V1/platform_versions?account=${acct}" \
+    "$SSX_API_EM_V1/platforms?account=${acct}" \
+    "$SSX_API_EM_V2/platform_versions?account=${acct}"
+  do
+    if resp="$(ssx_http GET "$path" 2>/dev/null)"; then
+      [[ -n "$resp" ]] && break
+    fi
+    resp=""
+  done
+
+  local table=""
+  if [[ -n "$resp" ]]; then
+    table="$(jq -r '
+      [ .. | objects
+        | select((.id? != null)
+                 and ((.platform? // .platform_name? // .name? // "") | tostring | length > 0)) ]
+      | .[]
+      | [ (.id | tostring),
+          (((.platform? // .platform_name? // .name?) | tostring)
+           + (if (.version? // .platform_version? // null) != null
+              then " " + ((.version? // .platform_version?) | tostring) else "" end)) ]
+      | @tsv
+    ' <<<"$resp" 2>/dev/null || true)"
+  fi
+
+  local -a ids=() labels=()
+  local id label
+  while IFS=$'\t' read -r id label; do
+    [[ -z "$id" ]] && continue
+    ids+=("$id"); labels+=("$label")
+  done <<<"$table"
+
+  if (( ${#ids[@]} == 0 )); then
+    warn "Could not list SearchStax platforms automatically."
+    if [[ -n "$resp" ]]; then
+      dim "  response (truncated): $(printf '%s' "$resp" | tr -d '\n' | head -c 400)"
+    fi
+    info "The app must be created with platform 'Drupal', or its Solr collection"
+    info "keeps the generic schema and Drupal search returns nothing."
+    info "  Find the value in SearchStudio: open Create App, pick Platform=Drupal"
+    info "  and a Version, then read 'platform_version_id' from the create request"
+    info "  in your browser's network tab. Set it once in migration.env as"
+    info "  SEARCHSTAX_PLATFORM_VERSION_ID to skip this next time."
+    ask "platform_version_id (Enter to create the app without one)" SSX_PLATFORM_VERSION_ID ""
+    if [[ -z "$SSX_PLATFORM_VERSION_ID" ]]; then
+      warn "Creating the app without a platform — expect to fix its schema later."
+    fi
+    return 0
+  fi
+
+  info "Choose a SearchStax platform (pick Drupal):"
+  local i
+  for ((i = 0; i < ${#ids[@]}; i++)); do
+    dim "  [$((i+1))] id=${ids[i]}  ${labels[i]}"
+  done
+
+  # Default to the newest Drupal entry, which is what this migration wants.
+  local default_pick=1
+  for ((i = 0; i < ${#ids[@]}; i++)); do
+    if [[ "${labels[i]}" == *[Dd]rupal* ]]; then
+      default_pick=$((i + 1))
+    fi
+  done
+
+  local pick
+  while :; do
+    if [[ ! -t 0 ]]; then
+      SSX_PLATFORM_VERSION_ID="${ids[$((default_pick - 1))]}"
+      ok "Non-TTY — using ${labels[$((default_pick - 1))]} (id=$SSX_PLATFORM_VERSION_ID)"
+      return 0
+    fi
+    printf '  Platform number [1-%d, default %d]: ' "${#ids[@]}" "$default_pick"
+    read -r pick </dev/tty || pick=""
+    [[ -z "$pick" ]] && pick="$default_pick"
+    if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#ids[@]} )); then
+      SSX_PLATFORM_VERSION_ID="${ids[$((pick - 1))]}"
+      ok "SearchStax platform: ${labels[$((pick - 1))]} (id=$SSX_PLATFORM_VERSION_ID)"
+      return 0
+    fi
+    info "Enter a number 1..${#ids[@]}"
+  done
+}
+
+# Look an app up by the name we just created, for API revisions whose create
+# response does not carry the id.
+ssx_find_app_id_by_name() {
+  local name="$1" resp
+  resp="$(ssx_http GET "$SSX_API_EM_V2/apps?account=$(ssx_urlenc "$SSX_ACCOUNT")" 2>/dev/null)" || return 0
+  jq -r --arg n "$name" '
+    [ .. | objects | select((.id? != null) and (.name? == $n)) | .id ] | first // empty
+  ' <<<"$resp" 2>/dev/null || true
 }
 
 # --- App name validation -------------------------------------------------
@@ -439,7 +544,16 @@ ssx_create_one_app() {
   resp="$(ssx_http POST "$url" "$body")" \
     || { warn "Failed to create app '$name'"; return 1; }
   ssx_last_app_response="$resp"
-  ssx_last_app_id="$(jq -r '.data.id // .id // empty' <<<"$resp" 2>/dev/null || true)"
+  # The id has moved around between API revisions, so search rather than assume,
+  # and fall back to looking the app up by the name we just asked for.
+  ssx_last_app_id="$(jq -r '
+    .data.id // .id // .app.id // .data.app.id // .result.id //
+    ([.. | objects | select(.id? != null and (.name? != null)) | .id] | first) //
+    empty' <<<"$resp" 2>/dev/null || true)"
+  if [[ -z "$ssx_last_app_id" ]]; then
+    dim "  create response (truncated): $(printf '%s' "$resp" | tr -d '\n' | head -c 400)"
+    ssx_last_app_id="$(ssx_find_app_id_by_name "$name")"
+  fi
   if [[ -n "$ssx_last_app_id" ]]; then
     ok "Created app '$name' (id=$ssx_last_app_id)"
   else
