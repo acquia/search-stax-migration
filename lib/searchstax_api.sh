@@ -91,7 +91,9 @@ ssx_http() {
     args+=(-H "Content-Type: application/json" --data-binary "$body")
   fi
 
-  audit "curl -X $method $url"
+  # Callers capture this function's stdout and parse it as JSON, so the trace
+  # line has to go to stderr — on stdout it lands in the response body.
+  audit "curl -X $method $url" >&2
   local code
   code="$(curl "${args[@]}" 2>/dev/null)" || code="000"
   cat "$tmp"
@@ -229,9 +231,12 @@ ssx_login() {
     SEARCHSTAX_USER=""; SEARCHSTAX_PASS=""; unset SEARCHSTAX_2FA
     return 1
   }
-  SSX_TOKEN="$(jq -r '.token // empty' <<<"$resp")" \
-    || err "Could not parse SearchStax login response"
-  [[ -n "$SSX_TOKEN" ]] || err "SearchStax login response had no 'token' field"
+  SSX_TOKEN="$(jq -r '.token // empty' <<<"$resp" 2>/dev/null || true)"
+  if [[ -z "$SSX_TOKEN" ]]; then
+    warn "SearchStax login response could not be read as JSON."
+    warn "  response: $(printf '%s' "$resp" | tr -d '\n' | head -c 400)"
+    return 1
+  fi
   ok "Logged into SearchStax"
   ssx_session_save "$SEARCHSTAX_USER"
 }

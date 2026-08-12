@@ -84,3 +84,40 @@ body2="$(ssx_build_create_body "acme_client01_dev")"
 [[ "$(jq -r '.engine_password'            <<<"$body2")" == "engine-secret" ]] || { echo "FAIL: engine_password value"; exit 1; }
 
 echo "  ssx-json-body OK"
+
+# --- ssx_http must put ONLY the response body on stdout ----------------------
+# Callers do `resp="$(ssx_http ...)"` and pipe that into jq, so anything else
+# written to stdout becomes part of the "JSON":
+#
+#     parse error: Invalid numeric literal at line 1, column 2
+#
+# which is jq reading the "+ curl -X POST ..." trace line. The stubs above
+# silence audit(), so they cannot catch that — this section restores an audit
+# that prints to stdout exactly like the real one does.
+audit() { printf '+ %s\n' "$*"; }
+info()  { printf '%s\n' "$*"; }
+ok()    { printf '[OK] %s\n' "$*"; }
+
+# Stand in for curl: write the body to the -o path, print the status code.
+curl() {
+    local -a a=("$@")
+    local i out=""
+    for ((i = 0; i < ${#a[@]}; i++)); do
+        [[ "${a[i]}" == "-o" ]] && out="${a[i + 1]}"
+    done
+    [[ -n "$out" ]] && printf '{"token":"abc123"}' > "$out"
+    printf '200'
+}
+
+SSX_TOKEN=""
+resp="$(ssx_http POST "https://example.test/obtain-auth-token/" '{"username":"u"}')"
+
+if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
+    echo "FAIL: ssx_http stdout is not valid JSON — something else printed to stdout"
+    echo "  got: $resp"
+    exit 1
+fi
+[[ "$(jq -r '.token' <<<"$resp")" == "abc123" ]] \
+    || { echo "FAIL: token not parsed from ssx_http output (got: $resp)"; exit 1; }
+
+echo "  ssx_http keeps its trace output off stdout OK"
