@@ -503,9 +503,21 @@ ssx_pick_platform_version() {
       ok "Non-TTY — using ${labels[$((default_pick - 1))]} (id=$SSX_PLATFORM_VERSION_ID)"
       return 0
     fi
-    printf '  Platform number [1-%d, default %d]: ' "${#ids[@]}" "$default_pick"
+    printf '  Platform number [1-%d, default %d] or the id itself: ' "${#ids[@]}" "$default_pick"
     read -r pick </dev/tty || pick=""
     [[ -z "$pick" ]] && pick="$default_pick"
+    # The menu number and the platform id are both integers, so accept either
+    # rather than silently reading "4" as the row when id=4 was meant.
+    if [[ "$pick" =~ ^[0-9]+$ ]]; then
+      for ((i = 0; i < ${#ids[@]}; i++)); do
+        if [[ "${ids[i]}" == "$pick" ]] && (( pick > ${#ids[@]} )); then
+          SSX_PLATFORM_VERSION_ID="$pick"
+          ok "SearchStax platform: ${labels[i]} (id=$SSX_PLATFORM_VERSION_ID)"
+          _save_env_var SEARCHSTAX_PLATFORM_VERSION_ID "$SSX_PLATFORM_VERSION_ID"
+          return 0
+        fi
+      done
+    fi
     if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#ids[@]} )); then
       SSX_PLATFORM_VERSION_ID="${ids[$((pick - 1))]}"
       ok "SearchStax platform: ${labels[$((pick - 1))]} (id=$SSX_PLATFORM_VERSION_ID)"
@@ -603,7 +615,7 @@ ssx_create_one_app() {
   # The id has moved around between API revisions, so search rather than assume,
   # and fall back to looking the app up by the name we just asked for.
   ssx_last_app_id="$(jq -r '
-    .data.id // .id // .app.id // .data.app.id // .result.id //
+    .app_id // .data.id // .id // .app.id // .data.app.id // .result.id //
     ([.. | objects | select(.id? != null and (.name? != null)) | .id] | first) //
     empty' <<<"$resp" 2>/dev/null || true)"
   if [[ -z "$ssx_last_app_id" ]]; then
@@ -618,13 +630,13 @@ ssx_create_one_app() {
   return 0
 }
 
-# GET /experience-manager/v2/apps/<id>. Populates ssx_last_endpoint /
-# ssx_last_read_token / ssx_last_write_token / ssx_last_analytics_url.
+# Populate ssx_last_endpoint / ssx_last_read_token / ssx_last_write_token /
+# ssx_last_analytics_url for one app.
 #
-# Field paths below are best-effort: the create-response shape was inferred
-# from the SearchStudio SPA. If the API rev changes field names, this
-# function returns non-zero and phase_provision falls back to prompting
-# the operator (same UX as the pre-provisioning script).
+# There is no per-app route: GET /apps/<id> returns 404. The searchstax module
+# does the same thing — fetch the account's app list and index it by id
+# (Api::getApp() calls getApps()) — so this follows it, including the field
+# names it reads off an app record: update_endpoint and index_write_token.
 ssx_get_app_detail() {
   local id="$1"
   ssx_last_endpoint=""
@@ -633,44 +645,69 @@ ssx_get_app_detail() {
   ssx_last_analytics_url=""
   [[ -n "$id" ]] || return 1
 
-  local url
-  url="$SSX_API_EM_V2/apps/${id}?account=$(ssx_urlenc "$SSX_ACCOUNT")"
   local resp
-  resp="$(ssx_http GET "$url")" || {
-    warn "Could not fetch app detail (id=$id); endpoint will need to be pasted manually."
+  resp="$(ssx_http GET "$SSX_API_EM_V2/apps?account=$(ssx_urlenc "$SSX_ACCOUNT")")" || {
+    warn "Could not list apps to find id=$id; endpoint will need to be pasted manually."
     return 1
   }
 
-  ssx_last_endpoint="$(jq -r '
-    .data.endpoint_url // .endpoint_url //
-    .data.solr_url      // .solr_url      //
-    .data.read_url      // .read_url      // empty' <<<"$resp" 2>/dev/null || true)"
-  ssx_last_read_token="$(jq -r '
-    .data.read_token  // .read_token  // .data.tokens.read  // empty' <<<"$resp" 2>/dev/null || true)"
-  ssx_last_write_token="$(jq -r '
-    .data.write_token // .write_token // .data.tokens.write // empty' <<<"$resp" 2>/dev/null || true)"
-  ssx_last_analytics_url="$(jq -r '
-    .data.analytics_url // .analytics_url // empty' <<<"$resp" 2>/dev/null || true)"
+  local app
+  app="$(jq -c --arg id "$id" '
+    [ .. | objects
+      | select(((.id? // .app_id? // "") | tostring) == $id) ] | first // empty
+  ' <<<"$resp" 2>/dev/null || true)"
+  if [[ -z "$app" ]]; then
+    warn "App id=$id is not in the account's app list yet."
+    return 1
+  fi
 
-  # Only four fields are consumed above; the rest of the response is kept
-  # because it is the one place a config-set/deployment handle would appear,
-  # and re-fetching it later needs another interactive login. Tokens are
-  # stripped: this file is written for sharing.
+  ssx_last_endpoint="$(jq -r '
+    .update_endpoint // .endpoint_url // .solr_url // .read_url // empty' <<<"$app" 2>/dev/null || true)"
+  ssx_last_write_token="$(jq -r '
+    .index_write_token // .write_token // .tokens.write // empty' <<<"$app" 2>/dev/null || true)"
+  ssx_last_read_token="$(jq -r '
+    .index_read_token // .read_token // .tokens.read // empty' <<<"$app" 2>/dev/null || true)"
+  ssx_last_analytics_url="$(jq -r '
+    .analytics_url // empty' <<<"$app" 2>/dev/null || true)"
+  # Only the write token is stored by the connector; mirror it when the API
+  # reports just one.
+  [[ -z "$ssx_last_read_token" ]] && ssx_last_read_token="$ssx_last_write_token"
+
   if [[ -n "${ARTIFACTS_DIR:-}" ]]; then
     mkdir -p "$ARTIFACTS_DIR"
     local detail_file="${ARTIFACTS_DIR}/searchstax-app-${id}.json"
     jq 'walk(if type == "object"
              then with_entries(if (.key | test("token|password|secret|key"; "i"))
                                then .value = "***REDACTED***" else . end)
-             else . end)' <<<"$resp" > "$detail_file" 2>/dev/null \
-      || printf '%s\n' "$resp" > "$detail_file"
-    dim "  Full app detail (tokens redacted): ${detail_file}"
+             else . end)' <<<"$app" > "$detail_file" 2>/dev/null \
+      || printf '%s\n' "$app" > "$detail_file"
+    dim "  App record (tokens redacted): ${detail_file}"
   fi
 
   if [[ -z "$ssx_last_endpoint" ]]; then
-    warn "App detail response did not include an endpoint URL in any expected field."
-    dim  "  Response (first 500 chars): ${resp:0:500}"
+    warn "App record has no endpoint URL yet."
     return 1
   fi
   return 0
+}
+
+# A new app is not ready the moment it is created — the create response says
+# expected_minutes_to_completion — so its endpoint appears only once SearchStax
+# has finished provisioning it.
+ssx_wait_for_app() {
+  local id="$1" minutes="${2:-8}"
+  local deadline=$(( $(date +%s) + minutes * 60 ))
+  local attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    if ssx_get_app_detail "$id" 2>/dev/null; then
+      return 0
+    fi
+    if (( $(date +%s) >= deadline )); then
+      warn "App id=$id still has no endpoint after ${minutes} minute(s)."
+      return 1
+    fi
+    info "  waiting for SearchStax to finish provisioning the app (attempt ${attempt})…"
+    sleep 20
+  done
 }

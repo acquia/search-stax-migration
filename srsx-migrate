@@ -1905,7 +1905,7 @@ phase_provision() {
       [[ -n "$app_id" ]] && state_set "$state_key" "$app_id"
     fi
 
-    if [[ -n "$app_id" ]] && ssx_get_app_detail "$app_id"; then
+    if [[ -n "$app_id" ]] && ssx_wait_for_app "$app_id"; then
       _persist_app_creds "$k" "$ssx_last_endpoint" "$ssx_last_read_token" \
         "$ssx_last_write_token" "$ssx_last_analytics_url"
       ok "App ${k}/${#app_names[@]} '${n}' endpoint: ${ssx_last_endpoint}"
