@@ -56,3 +56,38 @@ if ! grep -q "Clearing progress markers under" /tmp/srsx-demo-forceall.log; then
 fi
 
 echo "  force-all-resets-progress OK"
+
+# --- --force must also re-ask answers already saved in migration.env ---------
+# A mistyped endpoint is persisted, and every later phase reads it back and
+# skips its own prompt, so without this there is no way to correct it short of
+# editing migration.env by hand.
+grep -q '^SEARCHSTAX_APP_ENDPOINT=' "$SRSX_DEMO_HOME/migration.env" \
+    || { echo "FAIL: seed run did not persist an endpoint to correct"; exit 1; }
+
+DEMO_ANSWERS="https://corrected.searchstax.com/9/core9/update,rt2,wt2,,k2" \
+    ./srsx-migrate --demo configure --only --force </dev/null \
+    >/tmp/srsx-demo-reask.log 2>&1 || {
+        rc=$?
+        echo "FAIL: forced configure exited $rc"
+        tail -40 /tmp/srsx-demo-reask.log
+        exit 1
+    }
+
+grep -q 'SearchStax App endpoint URL' /tmp/srsx-demo-reask.log \
+    || { echo "FAIL: 'configure --force' did not re-ask for the endpoint"; \
+         tail -40 /tmp/srsx-demo-reask.log; exit 1; }
+grep -q 'corrected.searchstax.com' "$SRSX_DEMO_HOME/migration.env" \
+    || { echo "FAIL: the corrected endpoint was not persisted"; \
+         grep SEARCHSTAX_APP_ENDPOINT "$SRSX_DEMO_HOME/migration.env"; exit 1; }
+
+# Without --force the saved answer must still be reused silently.
+./srsx-migrate --demo configure --only </dev/null >/tmp/srsx-demo-keep.log 2>&1 || {
+    rc=$?
+    echo "FAIL: plain configure exited $rc"
+    tail -40 /tmp/srsx-demo-keep.log
+    exit 1
+}
+grep -q 'SearchStax App endpoint URL' /tmp/srsx-demo-keep.log \
+    && { echo "FAIL: configure re-asked for the endpoint without --force"; exit 1; }
+
+echo "  --force re-asks saved answers, plain runs keep them OK"

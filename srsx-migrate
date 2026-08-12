@@ -662,6 +662,25 @@ ask() {
   printf -v "$var" '%s' "$input"
 }
 
+# ask_saved <prompt> <varname> [<empty-default>] — ask only when the variable
+# has no value, so a saved answer is not re-typed on every run. Under --force,
+# ask again with the saved value as the default: that is the only way to correct
+# an answer that was persisted wrong, since every later phase reads it back and
+# skips its own prompt.
+ask_saved() {
+  local prompt="$1" var="$2" empty_default="${3:-}"
+  local current="${!var:-}"
+  if [[ -n "$current" && "$FORCE" != "1" ]]; then
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    ask "$prompt" "$var" "$current"
+  else
+    ask "$prompt" "$var" "$empty_default"
+  fi
+  return 0
+}
+
 # ask_secret <prompt> <varname> — input echo disabled.
 ask_secret() {
   local prompt="$1" var="$2"
@@ -1645,13 +1664,19 @@ EOF
 
   confirm "About to commit composer.json/lock + built code and push to origin/${push_branch}"
   git_commit_safe "Search: install SearchStax migration modules"
-  local push_rc=0
-  ( cd "$REPO_ROOT" && run git push origin "$push_branch" ) || push_rc=$?
+  local push_rc=0 push_out=""
+  audit "git push origin ${push_branch}"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    push_out="$( cd "$REPO_ROOT" && git push origin "$push_branch" 2>&1 )" || push_rc=$?
+    [[ -n "$push_out" ]] && printf '%s\n' "$push_out"
+  fi
   if (( push_rc == 0 )); then
     ok "Pushed to origin/${push_branch}."
   else
-    warn "git push exited ${push_rc}. Resolve the push (auth, protected branch, etc.),
-     then re-run 'git push origin ${push_branch}' or './srsx-migrate install --force'."
+    _report_push_failure "$push_branch" "$push_out"
+    # Nothing new reached the remote, so there is nothing for Acquia to deploy.
+    # Asking "has it deployed yet?" next would invite a yes that is not true.
+    confirm "Continue anyway? Only if '${push_branch}' reached the remote some other way"
   fi
 
   # Deploy is a manual step (especially on ACSF, where pushing a branch does
@@ -1673,6 +1698,31 @@ EOF
   else
     warn "Leaving 'install' un-done because at least one site failed; re-run after fixing."
   fi
+}
+
+# A rejected push is easy to scroll past, and the next thing this phase does is
+# ask whether Acquia has finished deploying — so say plainly that nothing was
+# pushed, and name the cause when git reported one.
+_report_push_failure() {
+  local branch="$1" out="$2"
+  warn "git push to origin/${branch} FAILED — nothing new reached the remote."
+  if [[ "$out" == *"non-fast-forward"* || "$out" == *"fetch first"* \
+     || "$out" == *"behind its remote"* ]]; then
+    warn "  The remote branch already has commits this checkout does not, which is what
+       happens when an earlier run pushed and the local code was reverted after.
+       See what is on the remote but not here:
+         git -C '${REPO_ROOT}' fetch origin ${branch}
+         git -C '${REPO_ROOT}' log --oneline HEAD..origin/${branch}
+       Then either keep that work:
+         git -C '${REPO_ROOT}' pull --rebase origin ${branch}
+       or, ONLY if that branch is a disposable migration branch nobody else
+       uses, replace it deliberately:
+         git -C '${REPO_ROOT}' push --force-with-lease origin ${branch}"
+  else
+    warn "  Check the remote credentials, branch protection rules, and that the
+       branch name is one you are allowed to push."
+  fi
+  warn "  Once the push succeeds, re-run:  ./srsx-migrate install --force"
 }
 
 _phase_install_site() {
@@ -1761,6 +1811,8 @@ phase_provision() {
   #    standalone create-apps invocation by the operator).
   if _all_app_endpoints_set; then
     ok "App endpoint already configured. Skipping provisioning."
+    info "  --force does not re-ask here; it only re-runs the phase. To correct a"
+    info "  wrong endpoint or token, run:  ./srsx-migrate configure --force"
     phase_done_mark provision
     return 0
   fi
@@ -1936,13 +1988,13 @@ _configure_one_app() {
   au="$(ssx_app_field "$k" ANALYTICS_URL)"
   ak="$(ssx_app_field "$k" ANALYTICS_KEY)"
 
-  [[ -z "$ep" ]] && ask "SearchStax App endpoint URL (paste the Solr URL; a trailing /select or /update is fine)" ep
+  ask_saved "SearchStax App endpoint URL (paste the Solr URL; a trailing /select or /update is fine)" ep
   # Shown, not hidden: these end up in Drupal config anyway, and pasting them
   # blind is how the wrong token gets in without anyone noticing.
-  [[ -z "$rt" ]] && ask "SearchStax read token" rt
-  [[ -z "$wt" ]] && ask "SearchStax write token" wt
-  [[ -z "$au" ]] && ask "SearchStax analytics URL (or press Enter to skip)" au ""
-  if [[ -z "$ak" && -n "$au" ]]; then
+  ask_saved "SearchStax read token" rt
+  ask_saved "SearchStax write token" wt
+  ask_saved "SearchStax analytics URL (or press Enter to skip)" au ""
+  if [[ -n "$au" ]] && [[ -z "$ak" || "$FORCE" == "1" ]]; then
     ask_secret "SearchStax analytics key" ak
   fi
 
