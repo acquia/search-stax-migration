@@ -83,8 +83,7 @@ case "$sub" in
         echo "[clone-index] OK ${idx} -> searchstax_index"
         touch "$DSTATE/.state-after-clone"
         ;;
-      *inspect-index-topology.php)
-        echo "[topology] searchstax module version: 1.11.0"
+      *inspect-index-topology.php)        echo "[topology] searchstax module version: 1.11.0"
         echo "[topology] solr_to_searchstax_ss_migration: enabled"
         echo "[topology] servers (2):"
         echo "[topology]   acquia_search_server  backend=search_api_solr  connector=solr_acquia_connector  legacy-solr=yes  status=enabled"

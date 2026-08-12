@@ -48,6 +48,7 @@ FILES=(
   "lib/php-eval/clone-index.php"
   "lib/php-eval/create-key-entity.php"
   "lib/php-eval/create-server.php"
+  "lib/php-eval/export-solr-config.php"
   "lib/php-eval/import-config-yaml.php"
   "lib/php-eval/inspect-index-topology.php"
   "lib/php-eval/inspect-service-class.php"

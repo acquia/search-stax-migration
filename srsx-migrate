@@ -104,6 +104,7 @@ ASSUME_YES=0
 FORCE=0                    # --force re-runs done phases; with 'all' it resets progress first.
 RUN_ONLY=0                 # --only stops after the named phase instead of continuing.
 SRSX_CURRENT_PHASE=""      # Name of the phase currently running (set by header()).
+SRSX_SOLRCONFIG_ROOT=""    # Where 'solrconfig' writes the exported config sets.
 PHASE_START_TIME=0         # Unix timestamp when current phase started (set by header()).
 declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
 LOG_FILE=""
@@ -2958,6 +2959,74 @@ _doctor_site() {
 }
 
 # =============================================================================
+# SOLRCONFIG — export the Solr config set for upload to SearchStax
+# =============================================================================
+#
+# A SearchStax app created from the stock template runs the "default-config"
+# schema. search_api_solr needs its own generated config set, and Drupal cannot
+# push one to a hosted collection — SearchStax installs it. This produces the
+# archive to hand them, which is the same content as the "Get config.zip"
+# button on the server's admin page.
+
+run_solrconfig() {
+  header "solrconfig" "Export the Solr config set to install on the SearchStax collection."
+  local out_root="${ARTIFACTS_DIR}/solr-config"
+  mkdir -p "$out_root"
+  SRSX_SOLRCONFIG_ROOT="$out_root"
+  for_each_site _solrconfig_site
+  info ""
+  info "Send the archive(s) above to SearchStax and ask them to install it as the"
+  info "collection's config set and reload the collection. Then verify with:"
+  info "    ./srsx-migrate validate     # fails while the schema is not drupal-*"
+  info "and re-index once it passes:"
+  info "    ./srsx-migrate index --force"
+}
+
+_solrconfig_site() {
+  local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
+  local slug="default"
+  [[ -n "$DRUSH_URI" ]] && slug="$(printf '%s' "$DRUSH_URI" | tr -c 'A-Za-z0-9._-' '_')"
+
+  local local_dir="${SRSX_SOLRCONFIG_ROOT}/${slug}"
+  rm -rf "$local_dir"
+  mkdir -p "$local_dir"
+
+  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
+    audit "drush php:script export-solr-config.php  # generate the config set"
+    audit "acli ssh ${ACQUIA_APP}.${EFFECTIVE_ENV} -- 'cd <dir> && tar -cf - .' | tar -xf - -C ${local_dir}"
+    printf 'demo\n' > "${local_dir}/schema.xml"
+    ok "Config set written to ${local_dir} (demo)."
+    return 0
+  fi
+
+  local remote_dir="/tmp/srsx-solrcfg-${$}-${RANDOM}"
+  if ! drush_php_soft export-solr-config.php \
+      "SRSX_SERVER_ID=${server_id}" "SRSX_OUT_DIR=${remote_dir}"; then
+    warn "Could not generate the config set${DRUSH_URI:+ for ${DRUSH_URI}}."
+    warn "  Fall back to the 'Get config.zip' button on the server's admin page."
+    return 0
+  fi
+
+  if ! acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "cd '${remote_dir}' && tar -cf - ." \
+      | tar -xf - -C "$local_dir"; then
+    warn "Could not copy the generated config set back from the environment."
+    return 0
+  fi
+  acli ssh "${ACQUIA_APP}.${EFFECTIVE_ENV}" -- "rm -rf '${remote_dir}'" >/dev/null 2>&1 || true
+
+  local archive="${SRSX_SOLRCONFIG_ROOT}/${slug}.zip"
+  rm -f "$archive"
+  if command -v zip >/dev/null 2>&1; then
+    ( cd "$local_dir" && zip -qr "$archive" . ) \
+      && ok "Config set archive: ${archive}"
+  else
+    warn "'zip' is not installed, so no archive was created."
+    info "  The files are in ${local_dir} — zip that directory's CONTENTS (not the"
+    info "  directory itself) before sending it to SearchStax."
+  fi
+}
+
+# =============================================================================
 # DISPATCH
 # =============================================================================
 
@@ -2978,6 +3047,9 @@ ${C_BOLD}USAGE${C_RST}
   ./srsx-migrate doctor           Read-only: dump the Search-API server/index
                                   topology per site (why an index shows no
                                   server, what is registered as migrated).
+  ./srsx-migrate solrconfig       Export the Solr config set for SearchStax to
+                                  install on the collection (fixes "You are
+                                  using an incompatible Solr schema").
   ./srsx-migrate explain <phase>  Print the Acquia doc URL the phase implements.
   ./srsx-migrate --help           This message.
   ./srsx-migrate --version        Show version and exit.
@@ -3152,6 +3224,7 @@ dispatch() {
       "phase_validate"
       ;;
     doctor)              ensure_init; run_doctor ;;
+    solrconfig)          ensure_init; run_solrconfig ;;
     status)              print_status ;;
     explain)             shift; print_explain "${1:-}" ;;
     --help|-h|help)      print_help ;;
