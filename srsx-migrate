@@ -2604,6 +2604,28 @@ phase_handoff() {
   if phase_done_check handoff; then phase_skip_done handoff; return 0; fi
   guard_against_prod
 
+  cat <<EOF
+
+This phase exports the SearchStax config from ${ACQUIA_APP}.${EFFECTIVE_ENV},
+pulls it to your local repo, and stages it for commit. It does NOT commit or
+push — you review the diff first.
+
+If you would rather commit the config manually (e.g. the export already happened
+a previous time, or you prefer to do it from a different shell), skip this phase.
+
+EOF
+  local choice
+  ask_choice "Do you want to run the handoff export now?" choice \
+    "yes — export config from ${ACQUIA_APP}.${EFFECTIVE_ENV} and stage it locally" \
+    "skip — I will handle the config export and commit manually"
+  case "$choice" in
+    skip*|Skip*)
+      info "Skipping handoff. When ready, run: ./srsx-migrate handoff"
+      info "  Or manually:  drush --uri=<site> config:export && git add <config_dir> && git commit"
+      return 0
+      ;;
+  esac
+
   local config_dir
   if ! config_dir="$(_detect_config_dir)"; then
     err "No Drupal config sync directory found in ${REPO_ROOT}.
