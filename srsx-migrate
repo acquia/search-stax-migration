@@ -70,7 +70,7 @@ declare -A PHASE_DESC=(
   [provision]="Create the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. Auto-skipped if SEARCHSTAX_APP_ENDPOINT is already set or in --demo mode."
   [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
   [server]="Create the SearchStax-backed search_api server config."
-  [solrconfig]="Generate the Solr config set for the SearchStax collection and refuse to continue until it is installed."
+  [solrconfig]="Configure the SearchStax app so its collection is set up for Drupal, and refuse to continue until it is."
   [index]="Clone each legacy index into a SearchStax-backed copy and reindex."
   [views]="Switch every Search-API view to its new SearchStax-backed index."
   [route]="Enable 'Re-route searches through SearchStudio' + write analytics URL/key."
@@ -2998,12 +2998,13 @@ phase_solrconfig() {
 ─────────────────────────────────────────────────────────────
   ${C_BOLD}The migration stops here on purpose.${C_RST}
 
-  Indexing against a collection that is not running the Drupal config set
-  produces documents no search can read, while every phase reports success.
+  Indexing against a collection that is not set up for Drupal produces
+  documents no search can read, while every phase reports success.
 
-  Send the archive(s) under
+  The SearchStax app could not be configured automatically, so the config
+  set has been written to
     ${SRSX_SOLRCONFIG_ROOT}
-  to SearchStax and ask them to install it as the collection's config set,
+  Send it to SearchStax and ask them to install it on the collection,
   reload the collection, and set
     SOLR_MODULES="extraction,langid,ltr,analysis-extras"
 
@@ -3012,7 +3013,7 @@ phase_solrconfig() {
   which re-checks the collection and, once it passes, continues the run.
 ─────────────────────────────────────────────────────────────
 EOF
-  err "Solr config set is not installed on the SearchStax collection yet."
+  err "The SearchStax collection is not set up for Drupal yet."
 }
 
 _phase_solrconfig_site() {
@@ -3022,30 +3023,79 @@ _phase_solrconfig_site() {
   [[ -n "$DRUSH_URI" ]] && slug="$(printf '%s' "$DRUSH_URI" | tr -c 'A-Za-z0-9._-' '_')"
 
   if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
-    audit "drush php:script export-solr-config.php  # generate the config set"
-    audit "curl <core>/schema/name  # verify the collection runs it"
-    ok "Config set generated and schema verified (demo)."
+    audit "drush php:script searchstax-configure-app.php  # set the app's languages"
+    audit "curl <core>/schema/name  # verify the collection was rebuilt"
+    ok "SearchStax app configured and schema verified (demo)."
     return 0
   fi
-
-  _solrconfig_generate "$server_id" "$slug"
 
   local name
-  if ! name="$(_ssx_solr_schema_name "$ai")"; then
-    warn "Could not read the Solr schema name${DRUSH_URI:+ for ${DRUSH_URI}}."
-    warn "  Verify by hand on the server's admin page before indexing."
-    return 0
-  fi
-
+  name="$(_ssx_solr_schema_name "$ai")" || name=""
   if [[ "$name" == drupal-* ]]; then
-    ok "Collection schema: ${name} — the Drupal config set is installed."
+    ok "Collection schema: ${name} — already set up for Drupal."
     return 0
   fi
 
-  _srsx_site_fail "collection runs '${name}', not a Drupal config set"
-  warn "Collection schema is '${name}'${DRUSH_URI:+ for ${DRUSH_URI}}."
+  info "Collection schema is '${name:-unreadable}' — configuring the app through the SearchStax API."
+  if _solrconfig_configure_app "$server_id"; then
+    name="$(_ssx_wait_for_schema "$ai")" || name=""
+    if [[ "$name" == drupal-* ]]; then
+      ok "Collection schema: ${name} — SearchStax rebuilt the collection."
+      return 0
+    fi
+    warn "SearchStax accepted the configuration but the collection still reports '${name:-unreadable}'."
+  fi
+
+  # Either there was no login, the API refused, or the rebuild did not land.
+  # Produce the config set so it can be handed over instead.
+  _solrconfig_generate "$server_id" "$slug"
+  _srsx_site_fail "collection runs '${name:-unreadable}', not a Drupal config set"
+  warn "Collection schema is '${name:-unreadable}'${DRUSH_URI:+ for ${DRUSH_URI}}."
   warn "  Drupal will report 'You are using an incompatible Solr schema' and every"
   warn "  search will return nothing, however many documents get indexed."
+  return 0
+}
+
+# Drive the searchstax module's own API client to configure the app. The token
+# comes from our own login helper, which already handles 2FA and caches the
+# session, so a run that provisioned the app does not log in twice.
+_solrconfig_configure_app() {
+  local server_id="$1"
+
+  if [[ -z "${SSX_TOKEN:-}" ]]; then
+    ssx_session_load >/dev/null 2>&1 || true
+  fi
+  if [[ -z "${SSX_TOKEN:-}" ]]; then
+    local choice
+    ask_choice "Let srsx-migrate configure the SearchStax app? (needs your SearchStax login)" choice \
+      "yes — log in and configure the app automatically" \
+      "no  — I will send the config set to SearchStax myself"
+    case "$choice" in
+      no*|No*) return 1 ;;
+    esac
+    require_cmd jq
+    require_cmd curl
+    ssx_login || { warn "SearchStax login failed."; return 1; }
+  fi
+
+  drush_php_soft searchstax-configure-app.php \
+    "SRSX_SSX_TOKEN=${SSX_TOKEN}" \
+    "SRSX_SERVER_ID=${server_id}" \
+    "SRSX_ACCOUNT=${SSX_ACCOUNT:-}" \
+    "SRSX_APP_ID=${SEARCHSTAX_APP_ID:-}"
+}
+
+# SearchStax rebuilds the collection asynchronously after a language change, so
+# the schema does not flip on the next request. Poll briefly before giving up.
+_ssx_wait_for_schema() {
+  local k="$1" name="" i
+  for i in 1 2 3 4 5 6; do
+    name="$(_ssx_solr_schema_name "$k")" || name=""
+    [[ "$name" == drupal-* ]] && { printf '%s' "$name"; return 0; }
+    info "  waiting for SearchStax to rebuild the collection (${i}/6)…"
+    sleep 10
+  done
+  printf '%s' "$name"
   return 0
 }
 

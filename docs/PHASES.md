@@ -107,16 +107,20 @@ If verification fails, prints the manual UI fallback URL and pauses.
 
 ## `solrconfig`
 
+Creating the Drupal-side server is only half of what the searchstax module's own migration does. The other half is [`MigrationHelper::setAppLanguages()`](https://git.drupalcode.org/project/searchstax) calling `Api::setLanguages()`, which tells SearchStax which languages the app serves — and that is what makes SearchStax provision Drupal-compatible field types on the collection. Skipping it leaves the stock `default-config` schema, which **accepts every document Drupal sends and answers no query**: indexing reports 100% while search returns nothing.
+
 ```bash
-SRSX_SERVER_ID=<id> SRSX_OUT_DIR=<dir> drush php:script <export-solr-config.php>
+SRSX_SSX_TOKEN=… SRSX_SERVER_ID=… drush php:script <searchstax-configure-app.php>
 curl -H 'Authorization: Token …' '<core>/schema/name?wt=json'
 ```
 
-`search_api_solr` generates its own `schema.xml` and `solrconfig.xml`, and the searchstax module injects the SearchStudio request handlers into them through `hook_search_api_solr_config_files_alter()` (`solrconfig_studio`, `solrconfig_studio_spellcheck`, `solrconfig_studio_suggestors`, `searchstudio_schema`). A collection created from the stock Solr template runs `default-config` instead, which **accepts every document Drupal pushes and then answers no query** — indexing reports 100% while search returns nothing.
+The helper drives the module's own API client (`searchstax.api`, present in every release) rather than reimplementing the REST calls. The auth token is written into the key-value store that client reads — the same thing `drush searchstax:set-auth-token` does on releases new enough to have it — so this works on 1.9.x, which has no such command. Account and app are resolved automatically by matching the server's `context`/`core` against each app's `update_endpoint`.
 
-The config set is generated from the **SearchStax** server, not the legacy one: that alter hook only fires for a SearchStax-backed server, and the connector's `alterConfigFiles()` additionally adapts `solrconfig.xml` for SolrCloud and stamps the schema version the connector reports.
+The token comes from the toolkit's own SearchStax login, which handles 2FA and caches the session, so a run that provisioned the app does not log in twice.
 
-The archive lands in `artifacts/solr-config/<site>.zip`. Drupal cannot push a config set to a hosted collection, so SearchStax installs it; the phase then reads `GET <core>/schema/name` and **stops the whole run** while that is not `drupal-*`. Re-run `./srsx-migrate solrconfig --force` after the upload to re-check and continue.
+SearchStax rebuilds the collection asynchronously, so the phase polls `GET <core>/schema/name` for up to a minute and requires it to start with `drupal-`.
+
+**Fallback.** Some customers have no SearchStax portal credentials — the TAM provisioned the app. If the login is declined or the API call fails, the phase exports the config set with `search_api_solr.configset_controller` to `artifacts/solr-config/<site>.zip` and **stops the run** so it can be handed to SearchStax. Re-run `./srsx-migrate solrconfig --force` afterwards to re-check and continue.
 
 ## `index`
 Every index on the site is classified by `lib/php-eval/inspect-index-topology.php`, which asks Drupal's entity API directly. `drush search-api:list --format=json` cannot answer this: its default field set is `id,name,serverName,typeNames,status,limit`, so the machine-readable `server` column is omitted and only the human `serverName` label ships — which made every index look unattached.
