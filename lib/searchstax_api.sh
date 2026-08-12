@@ -399,15 +399,19 @@ ssx_pick_platform_version() {
     ' <<<"$resp" 2>/dev/null || true)"
   fi
 
-  # Fall back to probing for a listing endpoint. Read-only, and the path is not
-  # documented to us, so anything unrecognised drops through to manual entry.
+  # Fall back to the listing endpoint SearchStudio's own Create App form calls.
+  # resource_id is the plan_region_id: which platforms are offered depends on the
+  # region, so ssx_pick_region has to have run first. appId is sent by the SPA
+  # but is not ours to supply, so it is only added when known.
   if [[ -z "$table" ]]; then
     resp=""
-    for path in \
-      "$SSX_API_EM_V1/platform_versions?account=${acct}" \
-      "$SSX_API_EM_V1/platforms?account=${acct}" \
-      "$SSX_API_EM_V2/platform_versions?account=${acct}"
-    do
+    local -a candidates=(
+      "$SSX_API_EM_V1/apps/supported-platforms?account=${acct}&resource_id=${SSX_REGION_ID:-}"
+      "$SSX_API_EM_V1/apps/supported-platforms?account=${acct}"
+      "$SSX_API_EM_V1/platform_versions?account=${acct}"
+      "$SSX_API_EM_V1/platforms?account=${acct}"
+    )
+    for path in "${candidates[@]}"; do
       if resp="$(ssx_http GET "$path" 2>/dev/null)"; then
         [[ -n "$resp" ]] && break
       fi
@@ -418,12 +422,15 @@ ssx_pick_platform_version() {
       table="$(jq -r '
         [ .. | objects
           | select((.id? != null)
-                   and ((.platform? // .platform_name? // .name? // "") | tostring | length > 0)) ]
+                   and (((.platform? // .platform_name? // .platform_version? // .name? // "")
+                         | tostring | length) > 0)) ]
+        | unique_by(.id)
         | .[]
         | [ (.id | tostring),
-            (((.platform? // .platform_name? // .name?) | tostring)
-             + (if (.version? // .platform_version? // null) != null
-                then " " + ((.version? // .platform_version?) | tostring) else "" end)) ]
+            ([ ((.platform? // .platform_name? // "") | tostring),
+               ((.platform_version? // .version? // "") | tostring),
+               ((.name? // "") | tostring) ]
+             | map(select(. != "")) | unique | join(" ")) ]
         | @tsv
       ' <<<"$resp" 2>/dev/null || true)"
     fi
