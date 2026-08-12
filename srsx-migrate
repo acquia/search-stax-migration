@@ -2058,6 +2058,7 @@ _verify_searchstax_creds() {
     case "$http_code" in
       200)
         ok "SearchStax credentials verified (HTTP 200)."
+        _verify_searchstax_schema "$tok"
         return 0
         ;;
       401|403)
@@ -2099,6 +2100,75 @@ _verify_searchstax_creds() {
     _ssx_parse_endpoint "$ep"
     test_url="https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/select?q=*:*&rows=0&wt=json"
   done
+}
+
+# A reachable collection is not a usable one. search_api_solr needs its OWN
+# generated config set (schema name "drupal-<version>"); a SearchStax app
+# created from the stock template runs "default-config", which accepts
+# documents and then cannot answer a single search_api query. Drupal reports it
+# as "You are using an incompatible Solr schema", but only on the server's admin
+# page — nothing in a CLI migration surfaces it, so the whole run looks green
+# while search is dead.
+#
+# Solr's Schema API is the authority: GET <core>/schema/name.
+_verify_searchstax_schema() {
+  local tok="$1"
+  local url="https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/schema/name?wt=json"
+
+  audit "curl -s -S --max-time 10 -H 'Authorization: Token ***' '${url}'"
+  local body name
+  body="$(command curl -s -S --max-time 10 \
+    -H "Authorization: Token ${tok}" "$url" 2>&1)" || {
+      warn "Could not read the Solr schema name; skipping the schema check."
+      return 0
+    }
+  name="$(printf '%s' "$body" | jq -r '.name // empty' 2>/dev/null || true)"
+
+  if [[ -z "$name" ]]; then
+    warn "Could not read the Solr schema name; skipping the schema check."
+    return 0
+  fi
+  if [[ "$name" == drupal-* ]]; then
+    ok "Solr schema: ${name} — this collection has the Drupal config set."
+    return 0
+  fi
+
+  warn "Solr schema is '${name}', not a Drupal config set."
+  cat <<EOF
+
+  ${C_BOLD}This collection cannot serve Drupal search until its config set is replaced.${C_RST}
+  search_api_solr generates its own schema and solrconfig; a SearchStax app
+  created from the stock template runs '${name}', which will accept indexed
+  documents and then return nothing for every search_api query. Drupal shows
+  this on the server page as:
+
+      "You are using an incompatible Solr schema."
+
+  Fix it before indexing (SearchStax has to do the upload — Drupal cannot
+  push a config set to a hosted collection):
+
+    1. In Drupal:  /admin/config/search/search-api/server/searchstax_server
+       click ${C_BOLD}Get config.zip${C_RST}.
+    2. In SearchStax Studio, open this app and upload that zip as the
+       collection's config set, then reload the collection.
+       If Studio does not expose it, raise it with SearchStax support and
+       attach the zip — it is their side of the migration.
+    3. Re-run:  ./srsx-migrate index --force
+
+EOF
+  local schema_choice
+  ask_choice "How do you want to proceed?" schema_choice \
+    "stop here — I will upload the config set first (recommended)" \
+    "continue anyway — the config set is being handled separately"
+  case "$schema_choice" in
+    stop*|Stop*)
+      err "Stopped so the Solr config set can be uploaded first.
+       Re-run './srsx-migrate configure --force' once SearchStax reports the
+       collection is using the Drupal config set."
+      ;;
+  esac
+  warn "Continuing with an incompatible Solr schema — search will not work until it is replaced."
+  return 0
 }
 _save_env_var() {
   local key="$1" val="$2"
@@ -2635,6 +2705,8 @@ _phase_validate_site() {
   _drush_sapi_servers servers
   _drush_sapi_indexes indexes
 
+  _validate_solr_schema
+
   # Server URL must contain searchstax.com.
   local hosts
   hosts=$(printf '%s' "$servers" \
@@ -2661,6 +2733,37 @@ _phase_validate_site() {
       SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
     fi
   done <<< "$rows"
+}
+
+# Indexed item counts come from Drupal's tracker, not from Solr, so they read
+# 100% even when the collection cannot answer a query. Ask Solr what schema it
+# is actually running.
+_validate_solr_schema() {
+  [[ "$DEMO" == "1" || "$DRY_RUN" == "1" ]] && return 0
+  local ai ep tok
+  ai="$(_site_app_index "${DRUSH_URI:-}")"
+  ep="$(ssx_app_field "$ai" APP_ENDPOINT)"
+  tok="$(_ssx_update_token "$ai")"
+  [[ -z "$ep" || -z "$tok" ]] && return 0
+
+  _ssx_parse_endpoint "$ep"
+  local body name
+  body="$(command curl -s -S --max-time 10 -H "Authorization: Token ${tok}" \
+    "https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/schema/name?wt=json" 2>&1)" || {
+      warn "Could not read the Solr schema name from ${SRSX_EP_HOST}."
+      return 0
+    }
+  name="$(printf '%s' "$body" | jq -r '.name // empty' 2>/dev/null || true)"
+  [[ -z "$name" ]] && { warn "Could not read the Solr schema name."; return 0; }
+
+  if [[ "$name" == drupal-* ]]; then
+    ok "Solr schema: ${name}"
+  else
+    warn "Solr schema is '${name}', not a Drupal config set — search cannot work."
+    warn "  Upload the config.zip from the server's admin page to this SearchStax"
+    warn "  collection, reload it, then re-run './srsx-migrate index --force'."
+    SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
+  fi
 }
 
 # =============================================================================
