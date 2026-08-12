@@ -24,7 +24,7 @@ Every external command is printed (`+ command…`) to stdout *before* execution,
 
 ## Secret handling
 
-The SearchStax read token, write token, and analytics key are prompted via `read -s` (echo disabled) and held in process memory only. They are **never** written to `migration.env`. `migration.env` is also in `.gitignore`.
+The SearchStax read & write token and analytics key are prompted via `read -s` (echo disabled) and held in process memory only. They are **never** written to `migration.env`. `migration.env` is also in `.gitignore`.
 
 The recommended (and default) place for the analytics key, per the [Acquia documentation](https://docs.acquia.com/acquia-cloud-platform/enabling-searchstax-module-and-routing-searches-through-it), is a [Key module](https://www.drupal.org/project/key) entity. The toolkit creates one named `searchstax_analytics_key` and points `searchstax.settings.key_id` at it. The Key module entity is itself stored in active Drupal config — which means it ends up in `config/sync/key.key.searchstax_analytics_key.yml` if you don't override the provider.
 

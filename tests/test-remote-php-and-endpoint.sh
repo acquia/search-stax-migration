@@ -51,7 +51,7 @@ rm -rf "$SRSX_DEMO_HOME"
 EP="https://searchcloud-29-us-east-1.searchstax.com/29847/abdx18743001dev02-13912/update"
 LOG=/tmp/srsx-endpoint.log
 
-DEMO_ANSWERS="demoapp,dev,n,,main,${EP},read_token,write_token,https://an.searchstax.com,analytics_key,1" \
+DEMO_ANSWERS="demoapp,dev,n,,main,${EP},write_token,https://an.searchstax.com,analytics_key,1" \
     ./srsx-migrate --demo all </dev/null >"$LOG" 2>&1 \
     || fail "demo run exited non-zero" "$LOG"
 

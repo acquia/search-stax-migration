@@ -15,7 +15,7 @@ export SRSX_DEMO_HOME=/tmp/srsx-demo-home-forceall
 rm -rf "$SRSX_DEMO_HOME"
 
 # Seed a complete run so state/ has all done markers and last-phase=cleanup.
-DEMO_ANSWERS="demoapp,dev,n,,main,https://demo.searchstax.com,read_token,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
+DEMO_ANSWERS="demoapp,dev,n,,main,https://demo.searchstax.com,write_token,https://analytics.demo.searchstax.com,analytics_key,1" \
     ./srsx-migrate --demo all </dev/null >/tmp/srsx-demo-forceall-seed.log 2>&1 || {
         rc=$?
         echo "FAIL: seed run exited $rc"
@@ -64,7 +64,7 @@ echo "  force-all-resets-progress OK"
 grep -q '^SEARCHSTAX_APP_ENDPOINT=' "$SRSX_DEMO_HOME/migration.env" \
     || { echo "FAIL: seed run did not persist an endpoint to correct"; exit 1; }
 
-DEMO_ANSWERS="https://corrected.searchstax.com/9/core9/update,rt2,wt2,,k2" \
+DEMO_ANSWERS="https://corrected.searchstax.com/9/core9/update,wt2,,k2" \
     ./srsx-migrate --demo configure --only --force </dev/null \
     >/tmp/srsx-demo-reask.log 2>&1 || {
         rc=$?

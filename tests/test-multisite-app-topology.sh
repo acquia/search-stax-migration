@@ -42,7 +42,7 @@ EOF
 #   app2 creds: endpoint, read, write, analytics-url, analytics-key
 #   analytics-key storage: 1 (Key module)
 A_LOG=/tmp/srsx-topology-a.log
-DEMO_ANSWERS=",main,2,1,1,2,https://app1.example.searchstax.com,r1,w1,https://an1.example.searchstax.com,k1,https://app2.example.searchstax.com,r2,w2,https://an2.example.searchstax.com,k2,1" \
+DEMO_ANSWERS=",main,2,1,1,2,https://app1.example.searchstax.com,w1,https://an1.example.searchstax.com,k1,https://app2.example.searchstax.com,w2,https://an2.example.searchstax.com,k2,1" \
     ./srsx-migrate --demo all </dev/null >"$A_LOG" 2>&1 \
     || fail "scenario A run exited non-zero" "$A_LOG"
 
@@ -59,7 +59,6 @@ grep -q '^SEARCHSTAX_APP_ENDPOINT_1="https://app1.example.searchstax.com"$' "$EN
 grep -q '^SEARCHSTAX_APP_ENDPOINT_2="https://app2.example.searchstax.com"$' "$ENV_A" \
     || fail "app 2 endpoint not persisted" "$A_LOG"
 
-grep -q '^SEARCHSTAX_READ_TOKEN_2="r2"$'  "$ENV_A" || fail "app 2 read token not persisted" "$A_LOG"
 grep -q '^SEARCHSTAX_WRITE_TOKEN_2="w2"$' "$ENV_A" || fail "app 2 write token not persisted" "$A_LOG"
 
 # App 1 must mirror the unsuffixed vars for single-app backward compatibility.
@@ -95,7 +94,7 @@ EOF
 #   app2: endpoint, read, write, analytics-url(blank → key skipped)
 #   analytics-key storage: 1
 B_LOG=/tmp/srsx-topology-b.log
-DEMO_ANSWERS="1,2,https://app1.example.searchstax.com,r1,w1,,https://app2.example.searchstax.com,r2,w2,,1" \
+DEMO_ANSWERS="1,2,https://app1.example.searchstax.com,w1,,https://app2.example.searchstax.com,w2,,1" \
     ./srsx-migrate --demo configure --only </dev/null >"$B_LOG" 2>&1 \
     || fail "scenario B configure exited non-zero" "$B_LOG"
 

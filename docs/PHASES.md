@@ -69,8 +69,8 @@ Resumability: each created app id is recorded to `state/provisioned-app-id-<k>` 
 Interactive only. For **each** SearchStax app (one for single-site; K for a multisite, labeled with the sites it serves) asks for:
 
 - SearchStax app endpoint URL — paste the Solr URL; a trailing `/select` or `/update` is fine
-- SearchStax read token (input hidden)
-- SearchStax write token (input hidden)
+- SearchStax App endpoint URL
+- SearchStax read & write token (the single token used for both reading and writing)
 - SearchStax analytics URL (optional)
 - SearchStax analytics key (input hidden, optional)
 

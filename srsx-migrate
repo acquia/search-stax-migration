@@ -1989,15 +1989,17 @@ _configure_one_app() {
   ak="$(ssx_app_field "$k" ANALYTICS_KEY)"
 
   ask_saved "SearchStax App endpoint URL (paste the Solr URL; a trailing /select or /update is fine)" ep
-  # Shown, not hidden: these end up in Drupal config anyway, and pasting them
-  # blind is how the wrong token gets in without anyone noticing.
-  ask_saved "SearchStax read token" rt
-  ask_saved "SearchStax write token" wt
+  # The SearchStax connector stores one token ('update_token'); the write/read-write
+  # token is that value.  A separate read-only token is not used.
+  ask_saved "SearchStax read & write token" wt
   ask_saved "SearchStax analytics URL (or press Enter to skip)" au ""
   if [[ -n "$au" ]] && [[ -z "$ak" || "$FORCE" == "1" ]]; then
     ask_secret "SearchStax analytics key" ak
   fi
 
+  # Keep rt in sync with wt so the rest of the script never reads an empty value
+  # via ssx_app_field / _ssx_update_token.
+  rt="$wt"
   _persist_app_creds "$k" "$ep" "$rt" "$wt" "$au"
   # Show how the endpoint will be split for search_api_solr so a wrong paste is
   # obvious now rather than at 'server' time.
