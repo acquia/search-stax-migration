@@ -2,20 +2,23 @@
 
 /**
  * @file
- * Repoint one Search-API view from its legacy index to the copy on SearchStax.
+ * Repoint one Search-API view between its legacy index and the SearchStax copy.
  *
  * Invoked via:
- *   SRSX_VIEW_ID=<view_id> drush php:script lib/php-eval/switch-view-index.php
+ *   SRSX_VIEW_ID=<view_id> [SRSX_ROLLBACK=1] \
+ *     drush php:script lib/php-eval/switch-view-index.php
  *
  * Prefers MigrationHelper::switchViewToNewIndex(), the same method behind
  * `drush searchstax:switch-view-index`. That service only exists on newer
  * searchstax releases (1.9.x has the submodule but not the helper), so the same
- * rewrite is also implemented inline: set base_table to the new index and
- * rewrite every nested "table" key that names the old one.
+ * rewrite is also implemented inline: repoint base_table and rewrite every
+ * nested "table" key that names the old index.
  *
  * The old -> new mapping is read from the module's own copied_indexes record,
  * never guessed from index names: copies are called "searchstax_index…", not
- * "<original>_searchstax".
+ * "<original>_searchstax". Rollback uses its original_base_tables record, which
+ * is written when a view is switched, and restores the exact table the view had
+ * — a view built on a datasource table must not come back as an index table.
  *
  * No `use` statements: the body is wrapped in a closure where imports are
  * illegal, so classes are referenced fully qualified.
@@ -24,6 +27,7 @@
  */
 
 $viewId = getenv('SRSX_VIEW_ID') ?: '';
+$rollback = getenv('SRSX_ROLLBACK') === '1';
 if ($viewId === '') {
   fwrite(STDERR, "[switch-view-index] SRSX_VIEW_ID is required.\n");
   return 1;
@@ -46,99 +50,70 @@ if (!$view) {
   return 1;
 }
 
-$oldBaseTable = (string) $view->get('base_table');
+$copied = $utility->getCopiedIndexes();
+$currentBaseTable = (string) $view->get('base_table');
 $originalBaseTable = $utility->getOriginalBaseTables()[$viewId] ?? NULL;
-if ($originalBaseTable && $oldBaseTable !== $originalBaseTable) {
-  fwrite(STDOUT, "[switch-view-index] SKIP {$viewId} (already switched)\n");
-  return 0;
-}
 
-// Search-API views sit on search_api_index_<id> or search_api_datasource_<id>_<ds>,
-// and both the index ID and the datasource contain underscores, so the index is
-// identified by testing the copied ones against the table name.
-$oldIndexId = '';
-$newIndexId = '';
-foreach ($utility->getCopiedIndexes() as $from => $to) {
-  if (preg_match('/^search_api_(?:index|datasource)_' . preg_quote($from, '/') . '(_\w+)?$/', $oldBaseTable)) {
-    $oldIndexId = $from;
-    $newIndexId = $to;
-    break;
-  }
-}
-if ($oldIndexId === '') {
-  fwrite(STDERR, "[switch-view-index] ERR view '{$viewId}' is on '{$oldBaseTable}', "
-    . "which is not a copied index.\n");
-  return 1;
-}
-if (!$entityTypeManager->getStorage('search_api_index')->load($newIndexId)) {
-  fwrite(STDERR, "[switch-view-index] ERR the recorded copy '{$newIndexId}' no longer exists.\n");
-  return 1;
-}
+// Index IDs and datasource names both contain underscores, so a base table is
+// matched against known index IDs rather than split on "_".
+$tableNames = function (string $table, string $indexId): bool {
+  return (bool) preg_match(
+    '/^search_api_(?:index|datasource)_' . preg_quote($indexId, '/') . '(_\w+)?$/',
+    $table
+  );
+};
 
-if ($helper) {
-  // A handler already broken before the switch must not be blamed on the switch.
-  $viewExecutable = \Drupal::service('views.executable')->get($view);
-  $brokenBefore = $helper->getBrokenViewsHandlers($viewExecutable);
-
-  $helper->switchViewToNewIndex($view, $oldIndexId, $newIndexId);
-
-  $viewExecutable = \Drupal::service('views.executable')->get($view);
-  $newlyBroken = array_diff($helper->getBrokenViewsHandlers($viewExecutable), $brokenBefore);
-  if ($newlyBroken) {
-    fwrite(STDERR, "[switch-view-index] ERR switching {$viewId} would break: "
-      . implode(', ', $newlyBroken) . "\n");
-    fwrite(STDERR, "[switch-view-index]   Not saved. Fix the view, then re-run.\n");
-    return 1;
-  }
-}
-else {
-  fwrite(STDOUT, "[switch-view-index] this searchstax release has no migration_helper "
-    . "service; switching by hand.\n");
-
-  $switchTables = function (array &$config, string $from, string $to) use (&$switchTables): bool {
-    $changed = FALSE;
-    if (is_string($config['table'] ?? NULL)) {
-      $new = preg_replace(
-        '/^(search_api_(?:index|datasource)_)' . preg_quote($from, '/') . '(_\w+)?$/',
-        '$1' . $to . '$2',
-        $config['table']
-      );
-      if ($new !== $config['table']) {
-        $config['table'] = $new;
-        $changed = TRUE;
-      }
+$switchTables = function (array &$config, string $from, string $to) use (&$switchTables): bool {
+  $changed = FALSE;
+  if (is_string($config['table'] ?? NULL)) {
+    $new = preg_replace(
+      '/^(search_api_(?:index|datasource)_)' . preg_quote($from, '/') . '(_\w+)?$/',
+      '$1' . $to . '$2',
+      $config['table']
+    );
+    if ($new !== $config['table']) {
+      $config['table'] = $new;
+      $changed = TRUE;
     }
-    foreach ($config as &$value) {
+  }
+  foreach ($config as &$value) {
+    if (is_array($value) && $switchTables($value, $from, $to)) {
+      $changed = TRUE;
+    }
+  }
+  return $changed;
+};
+
+// $finalBaseTable is passed explicitly because switchViewToNewIndex() always
+// writes search_api_index_<id>, which would lose a datasource base table.
+$applySwitch = function (string $from, string $to, string $finalBaseTable)
+  use ($view, $helper, $switchTables): void {
+  if ($helper) {
+    $helper->switchViewToNewIndex($view, $from, $to);
+  }
+  else {
+    foreach ($view->toArray() as $key => $value) {
       if (is_array($value) && $switchTables($value, $from, $to)) {
-        $changed = TRUE;
+        $view->set($key, $value);
       }
     }
-    return $changed;
-  };
+  }
+  $view->set('base_table', $finalBaseTable);
+};
 
-  $view->set('base_table', 'search_api_index_' . $newIndexId);
-  foreach ($view->toArray() as $key => $value) {
-    if (is_array($value) && $switchTables($value, $oldIndexId, $newIndexId)) {
-      $view->set($key, $value);
+$resaveFacets = function () use ($view, $viewId, $helper, $entityTypeManager): void {
+  // Facets keep a dependency on the index behind their view, so they have to be
+  // re-saved or they keep pointing at the old one.
+  if ($helper) {
+    foreach ($helper->viewsIndexSwitchResaveAffectedFacets($view) as $facet) {
+      fwrite(STDOUT, "[switch-view-index] WARN facet '{$facet->id()}' could not be re-saved; "
+        . "re-save it by hand so it points at the correct index.\n");
     }
+    return;
   }
-}
-
-$view->save();
-if (!$originalBaseTable) {
-  $utility->addOriginalBaseTable($viewId, $oldBaseTable);
-}
-fwrite(STDOUT, "[switch-view-index] OK {$viewId}: {$oldIndexId} -> {$newIndexId}\n");
-
-// Facets keep a dependency on the index behind their view, so they have to be
-// re-saved or they keep pointing at the old one.
-if ($helper) {
-  foreach ($helper->viewsIndexSwitchResaveAffectedFacets($view) as $facet) {
-    fwrite(STDOUT, "[switch-view-index] WARN facet '{$facet->id()}' could not be re-saved; "
-      . "re-save it by hand so it points at the new index.\n");
+  if (!$entityTypeManager->hasDefinition('facets_facet')) {
+    return;
   }
-}
-elseif ($entityTypeManager->hasDefinition('facets_facet')) {
   foreach ($entityTypeManager->getStorage('facets_facet')->loadMultiple() as $facet) {
     if (strpos((string) $facet->getFacetSourceId(), '__' . $viewId . '__') === FALSE) {
       continue;
@@ -151,7 +126,91 @@ elseif ($entityTypeManager->hasDefinition('facets_facet')) {
         . $e->getMessage() . "\n");
     }
   }
+};
+
+if ($rollback) {
+  if (!$originalBaseTable) {
+    fwrite(STDERR, "[switch-view-index] ERR '{$viewId}' has no recorded original index, so it\n");
+    fwrite(STDERR, "[switch-view-index]   was not switched by this toolkit and cannot be rolled back.\n");
+    return 1;
+  }
+  if ($originalBaseTable === $currentBaseTable) {
+    fwrite(STDOUT, "[switch-view-index] SKIP {$viewId} (already on its original index)\n");
+    return 0;
+  }
+
+  $restoreTo = '';
+  $restoreFrom = '';
+  foreach ($copied as $from => $to) {
+    if ($tableNames($originalBaseTable, $from)) {
+      $restoreTo = $from;
+      $restoreFrom = $to;
+      break;
+    }
+  }
+  if ($restoreTo === '') {
+    fwrite(STDERR, "[switch-view-index] ERR cannot tell which index '{$originalBaseTable}' refers to.\n");
+    return 1;
+  }
+
+  $applySwitch($restoreFrom, $restoreTo, $originalBaseTable);
+  $view->save();
+  fwrite(STDOUT, "[switch-view-index] ROLLBACK {$viewId}: {$restoreFrom} -> {$restoreTo}\n");
+  $resaveFacets();
+  return 0;
 }
+
+if ($originalBaseTable && $currentBaseTable !== $originalBaseTable) {
+  fwrite(STDOUT, "[switch-view-index] SKIP {$viewId} (already switched)\n");
+  return 0;
+}
+
+$oldIndexId = '';
+$newIndexId = '';
+foreach ($copied as $from => $to) {
+  if ($tableNames($currentBaseTable, $from)) {
+    $oldIndexId = $from;
+    $newIndexId = $to;
+    break;
+  }
+}
+if ($oldIndexId === '') {
+  fwrite(STDERR, "[switch-view-index] ERR view '{$viewId}' is on '{$currentBaseTable}', "
+    . "which is not a copied index.\n");
+  return 1;
+}
+if (!$entityTypeManager->getStorage('search_api_index')->load($newIndexId)) {
+  fwrite(STDERR, "[switch-view-index] ERR the recorded copy '{$newIndexId}' no longer exists.\n");
+  return 1;
+}
+
+$brokenBefore = [];
+if ($helper) {
+  // A handler already broken before the switch must not be blamed on the switch.
+  $brokenBefore = $helper->getBrokenViewsHandlers(\Drupal::service('views.executable')->get($view));
+}
+
+$applySwitch($oldIndexId, $newIndexId, 'search_api_index_' . $newIndexId);
+
+if ($helper) {
+  $newlyBroken = array_diff(
+    $helper->getBrokenViewsHandlers(\Drupal::service('views.executable')->get($view)),
+    $brokenBefore
+  );
+  if ($newlyBroken) {
+    fwrite(STDERR, "[switch-view-index] ERR switching {$viewId} would break: "
+      . implode(', ', $newlyBroken) . "\n");
+    fwrite(STDERR, "[switch-view-index]   Not saved. Fix the view, then re-run.\n");
+    return 1;
+  }
+}
+
+$view->save();
+if (!$originalBaseTable) {
+  $utility->addOriginalBaseTable($viewId, $currentBaseTable);
+}
+fwrite(STDOUT, "[switch-view-index] OK {$viewId}: {$oldIndexId} -> {$newIndexId}\n");
+$resaveFacets();
 
 if ($helper && method_exists($helper, 'viewsIndexSwitchAdaptAffectedAutocompleteSearches')) {
   try {

@@ -2336,6 +2336,11 @@ _phase_views_site() {
     return 0
   fi
 
+  if [[ -n "${SRSX_ROLLBACK_VIEWS:-}" ]]; then
+    _phase_views_rollback
+    return 0
+  fi
+
   # Ask the site which views still point at a copied index. The module records
   # the original → copy mapping itself, so we do not have to guess index names.
   local views_out
@@ -2394,6 +2399,30 @@ _phase_views_site() {
     ok "Switched ${#views[@]} view(s) to SearchStax-backed indexes."
   else
     warn "Some views could not be switched${DRUSH_URI:+ on ${DRUSH_URI}} — see the summary below."
+  fi
+}
+
+# Put named views back on the index they were on before the migration touched
+# them. Only views this toolkit switched can be rolled back: the original table
+# comes from the module's own record, written at switch time.
+_phase_views_rollback() {
+  local -a wanted=()
+  read -r -a wanted <<< "$SRSX_ROLLBACK_VIEWS"
+  info "${C_BOLD}Rolling back ${#wanted[@]} view(s) to their original index${C_RST}"
+
+  local before_failure="$SRSX_SITE_HAD_FAILURE"
+  local view
+  for view in "${wanted[@]}"; do
+    site_step "roll back view '${view}'" \
+      drush_php_soft switch-view-index.php "SRSX_VIEW_ID=${view}" "SRSX_ROLLBACK=1"
+  done
+
+  drush_cr
+  if [[ "$SRSX_SITE_HAD_FAILURE" == "$before_failure" ]]; then
+    ok "Rolled back ${#wanted[@]} view(s)."
+    info "  Unset SRSX_ROLLBACK_VIEWS before running the views phase normally again."
+  else
+    warn "Some views could not be rolled back${DRUSH_URI:+ on ${DRUSH_URI}} — see the summary below."
   fi
 }
 
@@ -2715,7 +2744,13 @@ ${C_BOLD}WHAT THIS TOOLKIT DOES${C_RST}
   and deploy them to higher environments through your normal Acquia workflow.
 
 ${C_BOLD}ENVIRONMENT VARIABLES${C_RST}
-  NO_COLOR=1        Same as --no-color.
+  NO_COLOR=1                      Same as --no-color.
+  SRSX_COPY_INDEXES='<id> <id>'   index: also copy indexes the classifier left
+                                  alone (database-backed or unattached).
+  SRSX_SWITCH_VIEWS='<id> <id>'   views: switch only these views.
+  SRSX_ROLLBACK_VIEWS='<id> <id>' views: put these views back on the index they
+                                  were on before the migration, and do nothing
+                                  else. Unset it to resume normal runs.
 
 ${C_BOLD}REFERENCE${C_RST}
   Migration runbook : ${MIGRATION_DOC}

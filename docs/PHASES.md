@@ -159,6 +159,14 @@ Only views on an index recorded in `copied_indexes` are switched, so database-ba
 
 `switch-view-index.php` prefers `MigrationHelper::switchViewToNewIndex()`, and re-saves affected facets and adapts autocomplete searches. That service only exists on newer releases — searchstax 1.9.x ships the submodule with `solr_to_searchstax_ss_migration.utility` as its only service — so the same rewrite is also implemented inline: `base_table` is repointed and every nested `table` key naming the old index is rewritten. A view that was already switched is skipped.
 
+### Rolling a view back
+
+```bash
+SRSX_ROLLBACK_VIEWS='blog news' ./srsx-migrate views --force
+```
+
+Puts those views back on the index they were on before the migration and does nothing else. The original table comes from the module's own `original_base_tables` record, written when the view was switched, and is restored verbatim — a view built on a datasource table must not come back as an index table. A view this toolkit never switched has no record and is refused rather than guessed at. `./srsx-migrate doctor` shows the recorded original as `was=…` next to each view.
+
 ## `route`
 
 ```bash

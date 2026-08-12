@@ -101,10 +101,16 @@ case "$sub" in
         ;;
       *switch-view-index.php)
         view="(unknown)"
+        rollback=0
         for a in "${args[@]}"; do
           [[ "$a" == SRSX_VIEW_ID=* ]] && view="${a#SRSX_VIEW_ID=}"
+          [[ "$a" == SRSX_ROLLBACK=1 ]] && rollback=1
         done
-        echo "[switch-view-index] OK ${view}: default_index -> searchstax_index"
+        if (( rollback )); then
+          echo "[switch-view-index] ROLLBACK ${view}: searchstax_index -> default_index"
+        else
+          echo "[switch-view-index] OK ${view}: default_index -> searchstax_index"
+        fi
         ;;
       *set-multisite-prefix.php) echo "[set-multisite-prefix] OK (demo)." ;;
       *list-migrated-views.php)

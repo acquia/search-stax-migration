@@ -95,6 +95,21 @@ grep -q 'getCopiedIndexes' lib/php-eval/clone-index.php \
     || fail "clone-index.php must skip an index that was already copied"
 echo "  copies use the module's own service, and are idempotent OK"
 
+# --- a wrongly switched view must be recoverable ------------------------------
+grep -q 'SRSX_ROLLBACK' lib/php-eval/switch-view-index.php \
+    || fail "switch-view-index.php has no rollback path"
+grep -q 'getOriginalBaseTables' lib/php-eval/switch-view-index.php \
+    || fail "rollback must read the recorded original base table, not reconstruct one"
+# A view built on a datasource table must not come back as an index table, so
+# the recorded string is restored verbatim rather than rebuilt from the index ID.
+grep -q "applySwitch(\$restoreFrom, \$restoreTo, \$originalBaseTable)" lib/php-eval/switch-view-index.php \
+    || fail "rollback must restore the recorded base table verbatim"
+grep -q '_phase_views_rollback' srsx-migrate \
+    || fail "views phase does not honour SRSX_ROLLBACK_VIEWS"
+grep -q 'getOriginalBaseTables' lib/php-eval/list-migrated-views.php \
+    || fail "the report must show what each view was on before it was switched"
+echo "  a switched view can be rolled back to its recorded original OK"
+
 # --- the server mapping still gets registered for the module UI --------------
 grep -q 'addMigratedServer' lib/php-eval/create-server.php \
     || fail "create-server.php must register the legacy server as migrated"
