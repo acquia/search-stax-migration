@@ -455,6 +455,21 @@ ssx_get_app_detail() {
   ssx_last_analytics_url="$(jq -r '
     .data.analytics_url // .analytics_url // empty' <<<"$resp" 2>/dev/null || true)"
 
+  # Only four fields are consumed above; the rest of the response is kept
+  # because it is the one place a config-set/deployment handle would appear,
+  # and re-fetching it later needs another interactive login. Tokens are
+  # stripped: this file is written for sharing.
+  if [[ -n "${ARTIFACTS_DIR:-}" ]]; then
+    mkdir -p "$ARTIFACTS_DIR"
+    local detail_file="${ARTIFACTS_DIR}/searchstax-app-${id}.json"
+    jq 'walk(if type == "object"
+             then with_entries(if (.key | test("token|password|secret|key"; "i"))
+                               then .value = "***REDACTED***" else . end)
+             else . end)' <<<"$resp" > "$detail_file" 2>/dev/null \
+      || printf '%s\n' "$resp" > "$detail_file"
+    dim "  Full app detail (tokens redacted): ${detail_file}"
+  fi
+
   if [[ -z "$ssx_last_endpoint" ]]; then
     warn "App detail response did not include an endpoint URL in any expected field."
     dim  "  Response (first 500 chars): ${resp:0:500}"

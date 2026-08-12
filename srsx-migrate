@@ -70,6 +70,7 @@ declare -A PHASE_DESC=(
   [provision]="Create the SearchStax Site Search app(s) the migration will point at, via the SearchStax REST API. Auto-skipped if SEARCHSTAX_APP_ENDPOINT is already set or in --demo mode."
   [configure]="Prompt for SearchStax credentials; store via Key module or plain config."
   [server]="Create the SearchStax-backed search_api server config."
+  [solrconfig]="Generate the Solr config set for the SearchStax collection and refuse to continue until it is installed."
   [index]="Clone each legacy index into a SearchStax-backed copy and reindex."
   [views]="Switch every Search-API view to its new SearchStax-backed index."
   [route]="Enable 'Re-route searches through SearchStudio' + write analytics URL/key."
@@ -81,7 +82,7 @@ declare -A PHASE_DESC=(
 # Ordered list of phases for `all` and `status`. Backup runs BEFORE install
 # so the customer has a fresh restore point before any composer/drush change.
 readonly -a PHASE_ORDER=(
-  preflight backup install provision configure server index views route validate handoff cleanup
+  preflight backup install provision configure server solrconfig index views route validate handoff cleanup
 )
 
 # Environment names treated as production. Mutating phases run against
@@ -105,6 +106,7 @@ FORCE=0                    # --force re-runs done phases; with 'all' it resets p
 RUN_ONLY=0                 # --only stops after the named phase instead of continuing.
 SRSX_CURRENT_PHASE=""      # Name of the phase currently running (set by header()).
 SRSX_SOLRCONFIG_ROOT=""    # Where 'solrconfig' writes the exported config sets.
+SRSX_VERIFY_TOKEN=""       # Token in play for the configure-time SearchStax checks.
 PHASE_START_TIME=0         # Unix timestamp when current phase started (set by header()).
 declare -a SITES_ARR=()    # Per-site --uri values for multisite mode.
 LOG_FILE=""
@@ -2059,7 +2061,8 @@ _verify_searchstax_creds() {
     case "$http_code" in
       200)
         ok "SearchStax credentials verified (HTTP 200)."
-        _verify_searchstax_schema "$tok"
+        SRSX_VERIFY_TOKEN="$tok"
+        _verify_searchstax_schema
         return 0
         ;;
       401|403)
@@ -2113,20 +2116,19 @@ _verify_searchstax_creds() {
 #
 # Solr's Schema API is the authority: GET <core>/schema/name.
 _verify_searchstax_schema() {
-  local tok="$1"
   local url="https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/schema/name?wt=json"
-
   audit "curl -s -S --max-time 10 -H 'Authorization: Token ***' '${url}'"
+
   local body name
   body="$(command curl -s -S --max-time 10 \
-    -H "Authorization: Token ${tok}" "$url" 2>&1)" || {
-      warn "Could not read the Solr schema name; skipping the schema check."
+    -H "Authorization: Token ${SRSX_VERIFY_TOKEN}" "$url" 2>&1)" || {
+      warn "Could not read the Solr schema name; the solrconfig phase will re-check."
       return 0
     }
   name="$(printf '%s' "$body" | jq -r '.name // empty' 2>/dev/null || true)"
 
   if [[ -z "$name" ]]; then
-    warn "Could not read the Solr schema name; skipping the schema check."
+    warn "Could not read the Solr schema name; the solrconfig phase will re-check."
     return 0
   fi
   if [[ "$name" == drupal-* ]]; then
@@ -2135,40 +2137,9 @@ _verify_searchstax_schema() {
   fi
 
   warn "Solr schema is '${name}', not a Drupal config set."
-  cat <<EOF
-
-  ${C_BOLD}This collection cannot serve Drupal search until its config set is replaced.${C_RST}
-  search_api_solr generates its own schema and solrconfig; a SearchStax app
-  created from the stock template runs '${name}', which will accept indexed
-  documents and then return nothing for every search_api query. Drupal shows
-  this on the server page as:
-
-      "You are using an incompatible Solr schema."
-
-  Fix it before indexing (SearchStax has to do the upload — Drupal cannot
-  push a config set to a hosted collection):
-
-    1. In Drupal:  /admin/config/search/search-api/server/searchstax_server
-       click ${C_BOLD}Get config.zip${C_RST}.
-    2. In SearchStax Studio, open this app and upload that zip as the
-       collection's config set, then reload the collection.
-       If Studio does not expose it, raise it with SearchStax support and
-       attach the zip — it is their side of the migration.
-    3. Re-run:  ./srsx-migrate index --force
-
-EOF
-  local schema_choice
-  ask_choice "How do you want to proceed?" schema_choice \
-    "stop here — I will upload the config set first (recommended)" \
-    "continue anyway — the config set is being handled separately"
-  case "$schema_choice" in
-    stop*|Stop*)
-      err "Stopped so the Solr config set can be uploaded first.
-       Re-run './srsx-migrate configure --force' once SearchStax reports the
-       collection is using the Drupal config set."
-      ;;
-  esac
-  warn "Continuing with an incompatible Solr schema — search will not work until it is replaced."
+  info "  The 'solrconfig' phase will generate the config set to install and will"
+  info "  stop the run until the collection is running it, so nothing gets indexed"
+  info "  into a collection that cannot answer a query."
   return 0
 }
 _save_env_var() {
@@ -2345,6 +2316,10 @@ _phase_index_site() {
     done <<< "$new_ids"
     for idx in "${new_arr[@]}"; do
       info "Reindexing: ${idx}"
+      # Clear first: anything already in the collection was written under
+      # whatever schema was live at the time, and a reindex overwrites by
+      # document ID rather than removing what no longer matches.
+      drush sapi-c "$idx"
       drush sapi-rt "$idx"
       drush sapi-i "$idx"
       drush sapi-s "$idx"
@@ -2460,7 +2435,7 @@ _phase_index_check_target() {
     < <(awk -F'\t' -v OFS='\t' '$1=="[srsx-target]"{print $2,$3,$4}' <<<"$topology") || true
 
   case "$state" in
-    ok) return 0 ;;
+    ok) _phase_index_check_schema || return 1; return 0 ;;
     missing)
       _srsx_site_fail "search server '${server_id}' does not exist"
       warn "There is no '${server_id}' server on this site, so there is nothing to copy onto."
@@ -2505,6 +2480,27 @@ _ensure_migration_module() {
   warn "Copies made without it cannot record the old→new index mapping that the"
   warn "'views' phase depends on. Fix the module install and re-run:"
   warn "  ./srsx-migrate index --force"
+  return 1
+}
+
+# Documents written against the stock "default-config" schema are unreadable by
+# every search_api query, and the indexed count still reports 100% because it
+# comes from Drupal's tracker. Refuse rather than manufacture that state.
+_phase_index_check_schema() {
+  [[ "$DEMO" == "1" || "$DRY_RUN" == "1" ]] && return 0
+  local ai name
+  ai="$(_site_app_index "${DRUSH_URI:-}")"
+  if ! name="$(_ssx_solr_schema_name "$ai")"; then
+    warn "Could not read the Solr schema name; continuing without that check."
+    return 0
+  fi
+  if [[ "$name" == drupal-* ]]; then
+    return 0
+  fi
+  _srsx_site_fail "collection runs '${name}', not a Drupal config set"
+  warn "The SearchStax collection is running '${name}'."
+  warn "  Indexing onto it would report success and leave search returning nothing."
+  warn "  Run './srsx-migrate solrconfig --force' and follow what it prints."
   return 1
 }
 
@@ -2741,28 +2737,18 @@ _phase_validate_site() {
 # is actually running.
 _validate_solr_schema() {
   [[ "$DEMO" == "1" || "$DRY_RUN" == "1" ]] && return 0
-  local ai ep tok
+  local ai name
   ai="$(_site_app_index "${DRUSH_URI:-}")"
-  ep="$(ssx_app_field "$ai" APP_ENDPOINT)"
-  tok="$(_ssx_update_token "$ai")"
-  [[ -z "$ep" || -z "$tok" ]] && return 0
-
-  _ssx_parse_endpoint "$ep"
-  local body name
-  body="$(command curl -s -S --max-time 10 -H "Authorization: Token ${tok}" \
-    "https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/schema/name?wt=json" 2>&1)" || {
-      warn "Could not read the Solr schema name from ${SRSX_EP_HOST}."
-      return 0
-    }
-  name="$(printf '%s' "$body" | jq -r '.name // empty' 2>/dev/null || true)"
-  [[ -z "$name" ]] && { warn "Could not read the Solr schema name."; return 0; }
+  if ! name="$(_ssx_solr_schema_name "$ai")"; then
+    warn "Could not read the Solr schema name."
+    return 0
+  fi
 
   if [[ "$name" == drupal-* ]]; then
     ok "Solr schema: ${name}"
   else
     warn "Solr schema is '${name}', not a Drupal config set — search cannot work."
-    warn "  Upload the config.zip from the server's admin page to this SearchStax"
-    warn "  collection, reload it, then re-run './srsx-migrate index --force'."
+    warn "  Run './srsx-migrate solrconfig --force' and follow what it prints."
     SRSX_VALIDATE_FAIL=$((SRSX_VALIDATE_FAIL+1))
   fi
 }
@@ -2959,45 +2945,119 @@ _doctor_site() {
 }
 
 # =============================================================================
-# SOLRCONFIG — export the Solr config set for upload to SearchStax
+# SOLRCONFIG — the Solr config set the SearchStax collection must run
 # =============================================================================
 #
-# A SearchStax app created from the stock template runs the "default-config"
-# schema. search_api_solr needs its own generated config set, and Drupal cannot
-# push one to a hosted collection — SearchStax installs it. This produces the
-# archive to hand them, which is the same content as the "Get config.zip"
-# button on the server's admin page.
+# search_api_solr generates its own schema and solrconfig, and the searchstax
+# module injects the SearchStudio request handlers into them via
+# hook_search_api_solr_config_files_alter(). A collection created from the stock
+# template runs "default-config" instead, which accepts every document Drupal
+# pushes and then answers no search_api query — indexing reports 100% and search
+# returns nothing.
+#
+# Drupal cannot push a config set to a hosted collection, so this phase
+# generates it, checks what the collection is actually running, and refuses to
+# let the run continue while the two disagree.
 
-run_solrconfig() {
-  header "solrconfig" "Export the Solr config set to install on the SearchStax collection."
-  local out_root="${ARTIFACTS_DIR}/solr-config"
-  mkdir -p "$out_root"
-  SRSX_SOLRCONFIG_ROOT="$out_root"
-  for_each_site _solrconfig_site
-  info ""
-  info "Send the archive(s) above to SearchStax and ask them to install it as the"
-  info "collection's config set and reload the collection. Then verify with:"
-  info "    ./srsx-migrate validate     # fails while the schema is not drupal-*"
-  info "and re-index once it passes:"
-  info "    ./srsx-migrate index --force"
+# Echo the schema name Solr reports for app <k>, or nothing if it cannot be read.
+# Solr's Schema API is the authority; Drupal's indexed counts are not, because
+# they come from its own tracker rather than from Solr.
+_ssx_solr_schema_name() {
+  local k="$1" ep tok
+  ep="$(ssx_app_field "$k" APP_ENDPOINT)"
+  tok="$(_ssx_update_token "$k")"
+  [[ -z "$ep" || -z "$tok" ]] && return 1
+
+  _ssx_parse_endpoint "$ep"
+  local body
+  body="$(command curl -s -S --max-time 10 -H "Authorization: Token ${tok}" \
+    "https://${SRSX_EP_HOST}/${SRSX_EP_CONTEXT}/${SRSX_EP_CORE}/schema/name?wt=json" 2>&1)" \
+    || return 1
+  local name
+  name="$(printf '%s' "$body" | jq -r '.name // empty' 2>/dev/null || true)"
+  [[ -n "$name" ]] || return 1
+  printf '%s' "$name"
 }
 
-_solrconfig_site() {
+phase_solrconfig() {
+  header "solrconfig" "${PHASE_DESC[solrconfig]}"
+  if phase_done_check solrconfig; then phase_skip_done solrconfig; return 0; fi
+  guard_against_prod
+
+  SRSX_SOLRCONFIG_ROOT="${ARTIFACTS_DIR}/solr-config"
+  mkdir -p "$SRSX_SOLRCONFIG_ROOT"
+  srsx_site_results_reset
+  for_each_site _phase_solrconfig_site
+  if srsx_site_summary "solrconfig"; then
+    phase_done_mark solrconfig
+    return 0
+  fi
+
+  cat <<EOF
+
+─────────────────────────────────────────────────────────────
+  ${C_BOLD}The migration stops here on purpose.${C_RST}
+
+  Indexing against a collection that is not running the Drupal config set
+  produces documents no search can read, while every phase reports success.
+
+  Send the archive(s) under
+    ${SRSX_SOLRCONFIG_ROOT}
+  to SearchStax and ask them to install it as the collection's config set,
+  reload the collection, and set
+    SOLR_MODULES="extraction,langid,ltr,analysis-extras"
+
+  Then re-run:
+    ./srsx-migrate solrconfig --force
+  which re-checks the collection and, once it passes, continues the run.
+─────────────────────────────────────────────────────────────
+EOF
+  err "Solr config set is not installed on the SearchStax collection yet."
+}
+
+_phase_solrconfig_site() {
   local server_id="${SRSX_NEW_SERVER_ID:-searchstax_server}"
+  local ai; ai="$(_site_app_index "${DRUSH_URI:-}")"
   local slug="default"
   [[ -n "$DRUSH_URI" ]] && slug="$(printf '%s' "$DRUSH_URI" | tr -c 'A-Za-z0-9._-' '_')"
 
+  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
+    audit "drush php:script export-solr-config.php  # generate the config set"
+    audit "curl <core>/schema/name  # verify the collection runs it"
+    ok "Config set generated and schema verified (demo)."
+    return 0
+  fi
+
+  _solrconfig_generate "$server_id" "$slug"
+
+  local name
+  if ! name="$(_ssx_solr_schema_name "$ai")"; then
+    warn "Could not read the Solr schema name${DRUSH_URI:+ for ${DRUSH_URI}}."
+    warn "  Verify by hand on the server's admin page before indexing."
+    return 0
+  fi
+
+  if [[ "$name" == drupal-* ]]; then
+    ok "Collection schema: ${name} — the Drupal config set is installed."
+    return 0
+  fi
+
+  _srsx_site_fail "collection runs '${name}', not a Drupal config set"
+  warn "Collection schema is '${name}'${DRUSH_URI:+ for ${DRUSH_URI}}."
+  warn "  Drupal will report 'You are using an incompatible Solr schema' and every"
+  warn "  search will return nothing, however many documents get indexed."
+  return 0
+}
+
+# Generate the config set on the environment and bring it back as a zip.
+# It has to be generated from the SearchStax server: the searchstax module's
+# hook_search_api_solr_config_files_alter() only fires for a SearchStax-backed
+# server, and it is what adds the SearchStudio handlers to the files.
+_solrconfig_generate() {
+  local server_id="$1" slug="$2"
   local local_dir="${SRSX_SOLRCONFIG_ROOT}/${slug}"
   rm -rf "$local_dir"
   mkdir -p "$local_dir"
-
-  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
-    audit "drush php:script export-solr-config.php  # generate the config set"
-    audit "acli ssh ${ACQUIA_APP}.${EFFECTIVE_ENV} -- 'cd <dir> && tar -cf - .' | tar -xf - -C ${local_dir}"
-    printf 'demo\n' > "${local_dir}/schema.xml"
-    ok "Config set written to ${local_dir} (demo)."
-    return 0
-  fi
 
   local remote_dir="/tmp/srsx-solrcfg-${$}-${RANDOM}"
   if ! drush_php_soft export-solr-config.php \
@@ -3017,13 +3077,12 @@ _solrconfig_site() {
   local archive="${SRSX_SOLRCONFIG_ROOT}/${slug}.zip"
   rm -f "$archive"
   if command -v zip >/dev/null 2>&1; then
-    ( cd "$local_dir" && zip -qr "$archive" . ) \
-      && ok "Config set archive: ${archive}"
+    ( cd "$local_dir" && zip -qr "$archive" . ) && ok "Config set archive: ${archive}"
   else
     warn "'zip' is not installed, so no archive was created."
-    info "  The files are in ${local_dir} — zip that directory's CONTENTS (not the"
-    info "  directory itself) before sending it to SearchStax."
+    info "  Zip the CONTENTS of ${local_dir} (not the directory itself) for SearchStax."
   fi
+  return 0
 }
 
 # =============================================================================
@@ -3047,9 +3106,6 @@ ${C_BOLD}USAGE${C_RST}
   ./srsx-migrate doctor           Read-only: dump the Search-API server/index
                                   topology per site (why an index shows no
                                   server, what is registered as migrated).
-  ./srsx-migrate solrconfig       Export the Solr config set for SearchStax to
-                                  install on the collection (fixes "You are
-                                  using an incompatible Solr schema").
   ./srsx-migrate explain <phase>  Print the Acquia doc URL the phase implements.
   ./srsx-migrate --help           This message.
   ./srsx-migrate --version        Show version and exit.
@@ -3206,7 +3262,7 @@ dispatch() {
       SITES=""; SITES_ARR=()
       ensure_init
       ;;
-    preflight|install|backup|provision|configure|server|index|views|route|handoff|cleanup)
+    preflight|install|backup|provision|configure|server|solrconfig|index|views|route|handoff|cleanup)
       ensure_init
       if [[ "$RUN_ONLY" == "1" ]]; then
         "phase_$1"
@@ -3224,7 +3280,6 @@ dispatch() {
       "phase_validate"
       ;;
     doctor)              ensure_init; run_doctor ;;
-    solrconfig)          ensure_init; run_solrconfig ;;
     status)              print_status ;;
     explain)             shift; print_explain "${1:-}" ;;
     --help|-h|help)      print_help ;;

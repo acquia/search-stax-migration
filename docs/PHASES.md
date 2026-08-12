@@ -105,8 +105,20 @@ drush config:get search_api.server.<id> --format=json  # verify
 
 If verification fails, prints the manual UI fallback URL and pauses.
 
-## `index`
+## `solrconfig`
 
+```bash
+SRSX_SERVER_ID=<id> SRSX_OUT_DIR=<dir> drush php:script <export-solr-config.php>
+curl -H 'Authorization: Token …' '<core>/schema/name?wt=json'
+```
+
+`search_api_solr` generates its own `schema.xml` and `solrconfig.xml`, and the searchstax module injects the SearchStudio request handlers into them through `hook_search_api_solr_config_files_alter()` (`solrconfig_studio`, `solrconfig_studio_spellcheck`, `solrconfig_studio_suggestors`, `searchstudio_schema`). A collection created from the stock Solr template runs `default-config` instead, which **accepts every document Drupal pushes and then answers no query** — indexing reports 100% while search returns nothing.
+
+The config set is generated from the **SearchStax** server, not the legacy one: that alter hook only fires for a SearchStax-backed server, and the connector's `alterConfigFiles()` additionally adapts `solrconfig.xml` for SolrCloud and stamps the schema version the connector reports.
+
+The archive lands in `artifacts/solr-config/<site>.zip`. Drupal cannot push a config set to a hosted collection, so SearchStax installs it; the phase then reads `GET <core>/schema/name` and **stops the whole run** while that is not `drupal-*`. Re-run `./srsx-migrate solrconfig --force` after the upload to re-check and continue.
+
+## `index`
 Every index on the site is classified by `lib/php-eval/inspect-index-topology.php`, which asks Drupal's entity API directly. `drush search-api:list --format=json` cannot answer this: its default field set is `id,name,serverName,typeNames,status,limit`, so the machine-readable `server` column is omitted and only the human `serverName` label ships — which made every index look unattached.
 
 | Class | Where the index sits | Action |
