@@ -61,6 +61,8 @@ $resolveIndex = function (string $base) use ($indexes): string {
 $rows = [];
 $reported = 0;
 $pending = 0;
+$originals = $utility ? $utility->getOriginalBaseTables() : [];
+$switchedTo = array_flip($copied);
 fwrite(STDOUT, "[list-migrated-views] Search API views on this site:\n");
 foreach ($entityTypeManager->getStorage('view')->loadMultiple() as $view) {
   $base = $view->get('base_table');
@@ -86,6 +88,9 @@ foreach ($entityTypeManager->getStorage('view')->loadMultiple() as $view) {
     $action = 'SWITCH -> ' . $copied[$indexId];
     $rows[] = "[srsx-view]\t{$view->id()}\t{$base}\t{$indexId}\t{$copied[$indexId]}";
   }
+  elseif (isset($switchedTo[$indexId])) {
+    $action = 'done (already on SearchStax)';
+  }
   elseif ($serverId === '') {
     $action = 'leave (index is on no server)';
   }
@@ -103,11 +108,20 @@ foreach ($entityTypeManager->getStorage('view')->loadMultiple() as $view) {
     $action = 'leave (index not copied)';
   }
 
+  // The base table each view had before the migration touched it. This is the
+  // record of what a switched view actually came from, so "that one was a
+  // database view" can be checked instead of reconstructed from memory.
+  $was = '';
+  if (isset($originals[$view->id()]) && $originals[$view->id()] !== $base) {
+    $was = '  was=' . $originals[$view->id()];
+  }
+
   fwrite(STDOUT, '[list-migrated-views]   ' . $view->id()
     . '  index=' . ($indexId ?: '(unknown)')
     . '  server=' . ($serverId ?: '(none)')
     . '  backend=' . ($backend ?: '(none)')
     . '  base_table=' . $base
+    . $was
     . '  => ' . $action . "\n");
 }
 
