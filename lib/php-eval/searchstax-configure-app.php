@@ -31,28 +31,31 @@ $serverId = getenv('SRSX_SERVER_ID') ?: 'searchstax_server';
 $account  = getenv('SRSX_ACCOUNT') ?: '';
 $appId    = (int) (getenv('SRSX_APP_ID') ?: 0);
 
-if ($token === '') {
-  fwrite(STDERR, "[searchstax-configure-app] SRSX_SSX_TOKEN is required.\n");
-  return 1;
-}
 if (!\Drupal::hasService('searchstax.api')) {
   fwrite(STDERR, "[searchstax-configure-app] ERR the searchstax module is not enabled here.\n");
   return 1;
 }
 
-// The client reads its token from this store; writing it here is a login as far
-// as the client is concerned.
-\Drupal::service('keyvalue.expirable')->get('searchstax')->setWithExpire(
-  'api.auth_token',
-  ['token' => $token, 'expire' => time() + 86400],
-  86400
-);
+// A token is only needed when the module has no valid session of its own. It
+// keeps one for 24 hours, so a site whose admin has logged in to SearchStax
+// through the Drupal UI is already authenticated and needs no second login.
+if ($token !== '') {
+  \Drupal::service('keyvalue.expirable')->get('searchstax')->setWithExpire(
+    'api.auth_token',
+    ['token' => $token, 'expire' => time() + 86400],
+    86400
+  );
+}
 
 $api = \Drupal::service('searchstax.api');
 if (!$api->isLoggedIn()) {
-  fwrite(STDERR, "[searchstax-configure-app] ERR the injected token was not accepted.\n");
-  return 1;
+  // Distinct marker so the caller can offer a login instead of treating this
+  // as a hard failure.
+  fwrite(STDOUT, "[searchstax-configure-app] NO_SESSION the module has no valid SearchStax session.\n");
+  return 2;
 }
+fwrite(STDOUT, '[searchstax-configure-app] session: '
+  . ($token !== '' ? 'supplied by srsx-migrate' : 'already held by the module') . "\n");
 
 try {
   if ($account === '') {

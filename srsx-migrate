@@ -3056,18 +3056,33 @@ _phase_solrconfig_site() {
   return 0
 }
 
-# Drive the searchstax module's own API client to configure the app. The token
-# comes from our own login helper, which already handles 2FA and caches the
-# session, so a run that provisioned the app does not log in twice.
+# Drive the searchstax module's own API client to configure the app.
+#
+# The module keeps its own SearchStax session for 24 hours, so try that first:
+# a site whose admin has logged in through the Drupal UI, or that a previous run
+# authenticated, needs no login here at all. Only when it reports NO_SESSION do
+# we ask for one, and even then our login helper reuses its cached session.
 _solrconfig_configure_app() {
-  local server_id="$1"
+  local server_id="$1" out=""
 
+  out="$(drush_php_soft searchstax-configure-app.php \
+    "SRSX_SERVER_ID=${server_id}" \
+    "SRSX_ACCOUNT=${SSX_ACCOUNT:-}" \
+    "SRSX_APP_ID=${SEARCHSTAX_APP_ID:-}" 2>&1)" || true
+  printf '%s\n' "$out"
+  if [[ "$out" != *NO_SESSION* ]]; then
+    # Either it worked, or it failed for a reason a login would not fix.
+    [[ "$out" == *"[searchstax-configure-app] OK"* ]] && return 0
+    return 1
+  fi
+
+  info "The site has no SearchStax session, so one is needed to configure the app."
   if [[ -z "${SSX_TOKEN:-}" ]]; then
     ssx_session_load >/dev/null 2>&1 || true
   fi
   if [[ -z "${SSX_TOKEN:-}" ]]; then
     local choice
-    ask_choice "Let srsx-migrate configure the SearchStax app? (needs your SearchStax login)" choice \
+    ask_choice "Log in to SearchStax now so srsx-migrate can configure the app?" choice \
       "yes — log in and configure the app automatically" \
       "no  — I will send the config set to SearchStax myself"
     case "$choice" in
@@ -3078,11 +3093,13 @@ _solrconfig_configure_app() {
     ssx_login || { warn "SearchStax login failed."; return 1; }
   fi
 
-  drush_php_soft searchstax-configure-app.php \
+  out="$(drush_php_soft searchstax-configure-app.php \
     "SRSX_SSX_TOKEN=${SSX_TOKEN}" \
     "SRSX_SERVER_ID=${server_id}" \
     "SRSX_ACCOUNT=${SSX_ACCOUNT:-}" \
-    "SRSX_APP_ID=${SEARCHSTAX_APP_ID:-}"
+    "SRSX_APP_ID=${SEARCHSTAX_APP_ID:-}" 2>&1)" || true
+  printf '%s\n' "$out"
+  [[ "$out" == *"[searchstax-configure-app] OK"* ]]
 }
 
 # SearchStax rebuilds the collection asynchronously after a language change, so
