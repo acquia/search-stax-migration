@@ -376,30 +376,57 @@ ssx_pick_platform_version() {
 
   local acct resp="" path
   acct="$(ssx_urlenc "$SSX_ACCOUNT")"
-  for path in \
-    "$SSX_API_EM_V1/platform_versions?account=${acct}" \
-    "$SSX_API_EM_V1/platforms?account=${acct}" \
-    "$SSX_API_EM_V2/platform_versions?account=${acct}"
-  do
-    if resp="$(ssx_http GET "$path" 2>/dev/null)"; then
-      [[ -n "$resp" ]] && break
-    fi
-    resp=""
-  done
 
+  # Apps already in the account are the most reliable source: any of them made
+  # with Platform=Drupal carries the very id we need, and /apps is an endpoint
+  # we already rely on rather than one we are guessing at.
   local table=""
-  if [[ -n "$resp" ]]; then
+  if resp="$(ssx_http GET "$SSX_API_EM_V2/apps?account=${acct}" 2>/dev/null)"; then
     table="$(jq -r '
       [ .. | objects
-        | select((.id? != null)
-                 and ((.platform? // .platform_name? // .name? // "") | tostring | length > 0)) ]
+        | select(.platform_version_id? != null)
+        | { id: .platform_version_id,
+            label: (((.platform? // .platform_name? // .platform_type? // "")
+                     | if type == "object" then (.name? // "") else tostring end)
+                    + (if (.platform_version? // .version? // null) != null
+                       then " " + ((.platform_version? // .version?) | tostring) else "" end)),
+            app: ((.name? // "") | tostring) } ]
+      | unique_by(.id)
       | .[]
       | [ (.id | tostring),
-          (((.platform? // .platform_name? // .name?) | tostring)
-           + (if (.version? // .platform_version? // null) != null
-              then " " + ((.version? // .platform_version?) | tostring) else "" end)) ]
+          ((if .label == "" then "platform" else .label end) + "  (used by app: " + .app + ")") ]
       | @tsv
     ' <<<"$resp" 2>/dev/null || true)"
+  fi
+
+  # Fall back to probing for a listing endpoint. Read-only, and the path is not
+  # documented to us, so anything unrecognised drops through to manual entry.
+  if [[ -z "$table" ]]; then
+    resp=""
+    for path in \
+      "$SSX_API_EM_V1/platform_versions?account=${acct}" \
+      "$SSX_API_EM_V1/platforms?account=${acct}" \
+      "$SSX_API_EM_V2/platform_versions?account=${acct}"
+    do
+      if resp="$(ssx_http GET "$path" 2>/dev/null)"; then
+        [[ -n "$resp" ]] && break
+      fi
+      resp=""
+    done
+
+    if [[ -n "$resp" ]]; then
+      table="$(jq -r '
+        [ .. | objects
+          | select((.id? != null)
+                   and ((.platform? // .platform_name? // .name? // "") | tostring | length > 0)) ]
+        | .[]
+        | [ (.id | tostring),
+            (((.platform? // .platform_name? // .name?) | tostring)
+             + (if (.version? // .platform_version? // null) != null
+                then " " + ((.version? // .platform_version?) | tostring) else "" end)) ]
+        | @tsv
+      ' <<<"$resp" 2>/dev/null || true)"
+    fi
   fi
 
   local -a ids=() labels=()
@@ -416,13 +443,21 @@ ssx_pick_platform_version() {
     fi
     info "The app must be created with platform 'Drupal', or its Solr collection"
     info "keeps the generic schema and Drupal search returns nothing."
-    info "  Find the value in SearchStudio: open Create App, pick Platform=Drupal"
-    info "  and a Version, then read 'platform_version_id' from the create request"
-    info "  in your browser's network tab. Set it once in migration.env as"
-    info "  SEARCHSTAX_PLATFORM_VERSION_ID to skip this next time."
+    info ""
+    info "Easiest way to get the value, once:"
+    info "  1. In SearchStudio, create one app by hand with Platform=Drupal."
+    info "  2. Re-run this phase — the id is read back off that app automatically"
+    info "     and offered here, so you never have to look it up again."
+    info "Or read it directly: open Create App in SearchStudio with DevTools on the"
+    info "Network tab, pick Platform=Drupal, and look for 'platform_version_id' in"
+    info "the POST to /experience-manager/v2/apps."
+    info ""
+    info "Set it in migration.env as SEARCHSTAX_PLATFORM_VERSION_ID to skip this."
     ask "platform_version_id (Enter to create the app without one)" SSX_PLATFORM_VERSION_ID ""
     if [[ -z "$SSX_PLATFORM_VERSION_ID" ]]; then
-      warn "Creating the app without a platform — expect to fix its schema later."
+      warn "Creating the app without a platform — its collection will need fixing later."
+    else
+      _save_env_var SEARCHSTAX_PLATFORM_VERSION_ID "$SSX_PLATFORM_VERSION_ID"
     fi
     return 0
   fi
@@ -454,6 +489,7 @@ ssx_pick_platform_version() {
     if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#ids[@]} )); then
       SSX_PLATFORM_VERSION_ID="${ids[$((pick - 1))]}"
       ok "SearchStax platform: ${labels[$((pick - 1))]} (id=$SSX_PLATFORM_VERSION_ID)"
+      _save_env_var SEARCHSTAX_PLATFORM_VERSION_ID "$SSX_PLATFORM_VERSION_ID"
       return 0
     fi
     info "Enter a number 1..${#ids[@]}"
