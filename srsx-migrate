@@ -2791,6 +2791,7 @@ print_explain() {
 }
 
 run_all() {
+  _warn_active_overrides
   local started=0
   local from="${RUN_FROM:-${PHASE_ORDER[0]}}"
   for p in "${PHASE_ORDER[@]}"; do
@@ -2826,6 +2827,24 @@ srsx_cr_reminder() {
        deploy to another environment will fail there too — a container that
        cannot compile means the site cannot boot. Resolve it before deploying.
        Retry with:  acli remote:drush ${ACQUIA_APP}.${EFFECTIVE_ENV} -- cr"
+}
+
+# A leftover SRSX_* export from an earlier one-off silently changes what a full
+# run does — SRSX_ROLLBACK_VIEWS in particular turns the views phase into a
+# rollback and switches nothing.
+_warn_active_overrides() {
+  local v had=0
+  for v in SRSX_COPY_INDEXES SRSX_SWITCH_VIEWS SRSX_ROLLBACK_VIEWS SRSX_NEW_SERVER_ID; do
+    [[ -n "${!v:-}" ]] || continue
+    (( had == 0 )) && warn "Overrides are active in this shell:"
+    had=1
+    warn "  ${v}=${!v}"
+  done
+  (( had == 0 )) && return 0
+  if [[ -n "${SRSX_ROLLBACK_VIEWS:-}" ]]; then
+    warn "  SRSX_ROLLBACK_VIEWS makes the views phase roll back instead of switching."
+  fi
+  confirm "Continue with those overrides in effect?"
 }
 
 dispatch() {
