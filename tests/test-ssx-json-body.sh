@@ -147,3 +147,29 @@ ssx_pick_region < /dev/null > /dev/null 2>&1 || true
     || { echo "FAIL: plan_regions not parsed (SSX_REGION_ID='${SSX_REGION_ID}')"; exit 1; }
 
 echo "  plan_regions parses the real API response OK"
+
+# --- supported-platforms must parse, and default to recommended Drupal -------
+# Real response from /experience-manager/v1/apps/supported-platforms. The id is
+# on the version and the name on its parent, so neither level can be selected
+# alone — an earlier parser looked for objects carrying both and found none.
+SSX_PLATFORM_VERSION_ID=""
+_save_env_var() { :; }
+platforms_json='{"success":true,"platforms":[{"name":"Custom App","versions":[{"id":4,"version":"-","recommended":false}]},{"name":"Drupal","versions":[{"id":9,"version":"9","recommended":false},{"id":8,"version":"8","recommended":false},{"id":13,"version":"10","recommended":false},{"id":15,"version":"11","recommended":true},{"id":16,"version":"7","recommended":false}]},{"name":"Adobe Experience Manager","versions":[{"id":20,"version":"6.5","recommended":true}]}]}'
+
+curl() {
+    local -a a=("$@")
+    local i out=""
+    for ((i = 0; i < ${#a[@]}; i++)); do
+        [[ "${a[i]}" == "-o" ]] && out="${a[i + 1]}"
+    done
+    [[ -n "$out" ]] && printf '%s' "$platforms_json" > "$out"
+    printf '200'
+}
+
+ssx_pick_platform_version < /dev/null > /dev/null 2>&1 || true
+# 15 is Drupal 11, the entry the API flags as recommended — not the last Drupal
+# in the list (7) and not the recommended AEM one.
+[[ "$SSX_PLATFORM_VERSION_ID" == "15" ]] \
+    || { echo "FAIL: expected recommended Drupal (id 15), got '${SSX_PLATFORM_VERSION_ID}'"; exit 1; }
+
+echo "  supported-platforms defaults to the recommended Drupal version OK"

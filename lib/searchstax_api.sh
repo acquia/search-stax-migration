@@ -394,7 +394,8 @@ ssx_pick_platform_version() {
       | unique_by(.id)
       | .[]
       | [ (.id | tostring),
-          ((if .label == "" then "platform" else .label end) + "  (used by app: " + .app + ")") ]
+          ((if .label == "" then "platform" else .label end) + "  (used by app: " + .app + ")"),
+          "" ]
       | @tsv
     ' <<<"$resp" 2>/dev/null || true)"
   fi
@@ -420,27 +421,39 @@ ssx_pick_platform_version() {
 
     if [[ -n "$resp" ]]; then
       table="$(jq -r '
-        [ .. | objects
-          | select((.id? != null)
-                   and (((.platform? // .platform_name? // .platform_version? // .name? // "")
-                         | tostring | length) > 0)) ]
-        | unique_by(.id)
+        # Real shape: {"platforms":[{"name":"Drupal",
+        #   "versions":[{"id":15,"version":"11","recommended":true}, ...]}]}
+        # The id lives on the version, the name on its parent, so neither level
+        # can be selected on its own.
+        ( [ (.platforms // [])[]
+            | (.name // "") as $p
+            | (.versions // [])[]
+            | { id: .id,
+                label: ($p + (if ((.version // "") | tostring) as $v
+                              | ($v != "" and $v != "-")
+                              then " " + ((.version) | tostring) else "" end)),
+                rec: (.recommended // false) } ] ) as $viaPlatforms
+        | (if ($viaPlatforms | length) > 0 then $viaPlatforms
+           else [ .. | objects
+                  | select((.id? != null)
+                           and (((.platform? // .platform_name? // "") | tostring | length) > 0))
+                  | { id: .id,
+                      label: (((.platform? // .platform_name?) | tostring)
+                              + " " + ((.platform_version? // .version? // "") | tostring)),
+                      rec: false } ]
+           end)
         | .[]
-        | [ (.id | tostring),
-            ([ ((.platform? // .platform_name? // "") | tostring),
-               ((.platform_version? // .version? // "") | tostring),
-               ((.name? // "") | tostring) ]
-             | map(select(. != "")) | unique | join(" ")) ]
+        | [ (.id | tostring), .label, (if .rec then "recommended" else "" end) ]
         | @tsv
       ' <<<"$resp" 2>/dev/null || true)"
     fi
   fi
 
-  local -a ids=() labels=()
-  local id label
-  while IFS=$'\t' read -r id label; do
+  local -a ids=() labels=() recs=()
+  local id label rec
+  while IFS=$'\t' read -r id label rec; do
     [[ -z "$id" ]] && continue
-    ids+=("$id"); labels+=("$label")
+    ids+=("$id"); labels+=("$label"); recs+=("$rec")
   done <<<"$table"
 
   if (( ${#ids[@]} == 0 )); then
@@ -472,15 +485,15 @@ ssx_pick_platform_version() {
   info "Choose a SearchStax platform (pick Drupal):"
   local i
   for ((i = 0; i < ${#ids[@]}; i++)); do
-    dim "  [$((i+1))] id=${ids[i]}  ${labels[i]}"
+    dim "  [$((i+1))] id=${ids[i]}  ${labels[i]}${recs[i]:+  (${recs[i]})}"
   done
 
-  # Default to the newest Drupal entry, which is what this migration wants.
+  # Prefer the Drupal entry the API marks recommended, else the last Drupal one.
   local default_pick=1
   for ((i = 0; i < ${#ids[@]}; i++)); do
-    if [[ "${labels[i]}" == *[Dd]rupal* ]]; then
-      default_pick=$((i + 1))
-    fi
+    [[ "${labels[i]}" == *[Dd]rupal* ]] || continue
+    default_pick=$((i + 1))
+    [[ "${recs[i]}" == "recommended" ]] && break
   done
 
   local pick
