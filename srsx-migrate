@@ -1873,11 +1873,18 @@ phase_provision() {
     done
   fi
 
+  # Detect real Acquia Search core IDs to offer as naming candidates instead
+  # of the synthetic default above. Best-effort: any failure just leaves
+  # default_names untouched.
+  _detect_acquia_search_cores
+
   # Let the operator edit each name. Re-validate after edit; if still
   # invalid, suggest a sanitised version and ask once more before erroring.
   local -a app_names=()
   local n edited suggested
-  for n in "${default_names[@]}"; do
+  for (( k = 1; k <= ${#default_names[@]}; k++ )); do
+    n="${default_names[$((k - 1))]}"
+    n="$(_acquia_core_default_for_group "$k" "$n")"
     ask "App name to create" edited "$n"
     if ! ssx_validate_name "$edited"; then
       suggested="$(printf '%s' "$edited" | tr -c 'A-Za-z0-9_' '_')"
@@ -1956,6 +1963,88 @@ _ssx_group_app_name() {
   fi
   local raw="${ACQUIA_APP:-app}_${ACQUIA_TARGET_ENV:-dev}_app${k}"
   printf '%s\n' "$(printf '%s' "$raw" | tr -c 'A-Za-z0-9_' '_')"
+}
+
+# Best-effort detection of real Acquia Search core IDs to offer as SearchStax
+# app-naming candidates. Populates two globals consumed by
+# _acquia_core_default_for_group; never errors, never overrides an operator's
+# answer — it only changes what gets suggested.
+#   ACQUIA_AVAILABLE_CORES  deduped array of every core_id in the subscription
+#   ACQUIA_PREFERRED_MAP    "k=core_id,k=core_id,..." — exact match per app group
+ACQUIA_AVAILABLE_CORES=()
+ACQUIA_PREFERRED_MAP=""
+_detect_acquia_search_cores() {
+  ACQUIA_AVAILABLE_CORES=()
+  ACQUIA_PREFERRED_MAP=""
+  local groups=1
+  (( ${SEARCHSTAX_APP_COUNT:-1} > 1 )) && groups="$SEARCHSTAX_APP_COUNT"
+
+  local k rep s out tag kind id2 extra any_detected=0 any_attempted=0
+  local -a seen=()
+  for (( k = 1; k <= groups; k++ )); do
+    rep=""
+    if (( ${#SITES_ARR[@]} > 0 )); then
+      for s in "${SITES_ARR[@]}"; do
+        [[ "$(_site_app_index "$s")" == "$k" ]] && { rep="$s"; break; }
+      done
+    fi
+    DRUSH_URI="$rep"
+    out="$(drush_php_soft inspect-acquia-search-cores.php)" || out=""
+    DRUSH_URI=""
+    any_attempted=1
+    [[ -z "$out" ]] && continue
+
+    while IFS=$'\t' read -r tag kind id2 extra; do
+      [[ "$tag" == "[srsx-acquia-core]" ]] || continue
+      if [[ "$kind" == "available" && "$id2" != "NONE" ]]; then
+        if [[ ! " ${seen[*]:-} " == *" ${id2} "* ]]; then
+          seen+=("$id2")
+          ACQUIA_AVAILABLE_CORES+=("$id2")
+        fi
+        any_detected=1
+      elif [[ "$kind" == "preferred" && -n "$extra" ]]; then
+        ACQUIA_PREFERRED_MAP+="${k}=${extra},"
+        any_detected=1
+      fi
+    done <<< "$out"
+  done
+
+  if (( any_detected == 0 )); then
+    (( any_attempted == 1 )) && info "Could not detect existing Acquia Search core names (module missing/disabled or no subscription reachable) — enter names manually."
+    return 0
+  fi
+
+  info "Detected Acquia Search core name(s) on this subscription:"
+  local c
+  for c in "${ACQUIA_AVAILABLE_CORES[@]}"; do dim "  • $c"; done
+}
+
+# Resolve the suggested default name for app group <k>, given the synthetic
+# <fallback>: an exact preferred-core match wins outright; otherwise, if any
+# cores were detected, let the operator pick one (or opt for a custom name);
+# otherwise the synthetic fallback is unchanged.
+_acquia_core_default_for_group() {
+  local k="$1" fallback="$2"
+  if [[ "$ACQUIA_PREFERRED_MAP" == *"${k}="* ]]; then
+    local -a _acp_pairs=() pair
+    IFS=',' read -r -a _acp_pairs <<< "$ACQUIA_PREFERRED_MAP"
+    for pair in "${_acp_pairs[@]}"; do
+      if [[ "${pair%%=*}" == "$k" && -n "${pair#*=}" ]]; then
+        printf '%s\n' "$(printf '%s' "${pair#*=}" | tr -c 'A-Za-z0-9_' '_')"
+        return 0
+      fi
+    done
+  fi
+  if (( ${#ACQUIA_AVAILABLE_CORES[@]} > 0 )); then
+    local choice
+    ask_choice "Pick the Acquia Search core to name app ${k} after" choice \
+      "${ACQUIA_AVAILABLE_CORES[@]}" "custom name (type my own)"
+    if [[ "$choice" != "custom name (type my own)" ]]; then
+      printf '%s\n' "$(printf '%s' "$choice" | tr -c 'A-Za-z0-9_' '_')"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$fallback"
 }
 
 # =============================================================================

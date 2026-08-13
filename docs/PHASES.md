@@ -62,6 +62,8 @@ Every created app's endpoint URL **and** tokens (read/write/analytics) are persi
 
 Resumability: each created app id is recorded to `state/provisioned-app-id-<k>` *before* the detail-fetch, so a crash between create and detail re-uses the existing app instead of creating a duplicate on the next run.
 
+**App naming.** Before asking for each app's name, the phase best-effort detects the site's real Acquia Search core ID(s) (`lib/php-eval/inspect-acquia-search-cores.php`, reading the `acquia_search` module's own `PreferredCoreService`/`AcquiaSearchApiClient` — no new external integration). If any are found they're shown to the operator, who picks one (or types a custom name); an exact per-site preferred match is offered as the default. If `acquia_search` is missing/disabled or no cores are reachable, this is skipped with a one-line note and naming falls back to the previous synthetic `${ACQUIA_APP}_${ACQUIA_TARGET_ENV}` default — never a hard failure.
+
 > **Reverse-engineered.** Endpoints + body shapes were inferred from the SearchStudio SPA. The Drupal `searchstax` module does not expose app creation. If the API rev changes shape, `phase_provision` falls back to prompting the operator for the endpoint manually — same UX as before this phase existed.
 
 ## `configure`

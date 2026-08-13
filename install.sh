@@ -50,6 +50,7 @@ FILES=(
   "lib/php-eval/create-server.php"
   "lib/php-eval/export-solr-config.php"
   "lib/php-eval/import-config-yaml.php"
+  "lib/php-eval/inspect-acquia-search-cores.php"
   "lib/php-eval/inspect-index-topology.php"
   "lib/php-eval/inspect-service-class.php"
   "lib/php-eval/list-migrated-views.php"

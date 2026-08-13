@@ -7,6 +7,7 @@ migration.env
 # Local reference copies of contrib modules, used to verify APIs against source.
 searchstax-1.x/
 search_api-8.x-1.x/
+acquia_search-3.1.x/
 migration.env.bak*
 *.log
 
