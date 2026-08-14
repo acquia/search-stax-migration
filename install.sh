@@ -214,7 +214,7 @@ else
   cat > "$ENVFILE" <<'ENVEOF'
 # srsx-migrate runtime configuration.
 # Edit and commit-IGNORE this file. Secrets should NOT live here long-term;
-# prefer the Key module (see docs/SECURITY.md).
+# prefer the Key module (see docs/PHASES.md).
 
 # ---------------------------------------------------------------------------
 # Acquia target (REQUIRED). The toolkit runs every drush call as

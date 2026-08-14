@@ -5,16 +5,15 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: help lint check test demo demo-cast docs clean
+.PHONY: help lint check test demo docs clean
 
 help:
 	@echo "Targets:"
 	@echo "  lint        - bash -n + shellcheck on all shell scripts"
-	@echo "  check       - lint + verify config keys and the install.sh file manifest"
+	@echo "  check       - lint + verify config keys, install.sh manifest, and docs"
 	@echo "  test        - run --demo end-to-end with scripted answers (smoke test)"
 	@echo "  demo        - launch interactive demo mode in this terminal"
-	@echo "  demo-cast   - regenerate docs/_assets/demo.cast (asciinema)"
-	@echo "  docs        - regenerate auto-generated doc sections"
+	@echo "  docs        - check docs against the code (phases, subcommands, links)"
 	@echo "  clean       - remove local artifacts/, logs/, state/"
 
 SHELL_FILES := install.sh srsx-migrate \
@@ -36,6 +35,7 @@ check: lint
 	@bash tests/check-config-keys.sh
 	@bash tests/check-install-manifest.sh
 	@bash tests/check-arith-increment.sh
+	@bash tests/generate-docs.sh --check
 
 test:
 	@rm -rf state/ artifacts/ logs/ /tmp/srsx-demo-home-mtest
@@ -63,7 +63,6 @@ demo:
 
 docs:
 	@bash tests/generate-docs.sh
-
 clean:
 	@rm -rf artifacts/ logs/ state/ /tmp/srsx-*.log
 	@echo "  cleaned"

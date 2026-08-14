@@ -9,8 +9,7 @@
 - [ ] `make check` passes locally (lint + config-key drift check)
 - [ ] `make test` passes locally (full demo run)
 - [ ] No new shellcheck warnings
-- [ ] If a new phase or flag was added: documented in `docs/PHASES.md` and `docs/MAPPING.md`
-- [ ] If a new external command is invoked: row added to `docs/SECURITY.md` table
+- [ ] If a new phase or flag was added: documented in `docs/PHASES.md`, `README.md`, and `docs/QUICKSTART.md`
 - [ ] Updated `CHANGELOG.md` under "Unreleased"
 - [ ] No emojis added to code, output, or docs
 

@@ -6,6 +6,28 @@ Every phase is implemented as a single bash function in [`srsx-migrate`](../srsx
 
 > **All `drush ...` lines below are executed as `acli remote:drush ${ACQUIA_APP}.${ACQUIA_TARGET_ENV} -- ...`** — the toolkit never runs drush against your laptop. The terse form is used here to keep the docs readable.
 
+## Which Acquia doc page each phase implements
+
+This toolkit tracks the [official runbook](https://docs.acquia.com/acquia-cloud-platform/migrating-acquia-search-powered-searchstax) chapter by chapter. If the Acquia docs change, this table must change too.
+
+| Acquia doc page | Phase |
+| --- | --- |
+| [Preparing for the migration](https://docs.acquia.com/acquia-cloud-platform/preparing-migration-acquia-search-powered-searchstax) | `preflight`, `backup` |
+| [Installing the SearchStax module](https://docs.acquia.com/acquia-cloud-platform/installing-searchstax-module) | `install` |
+| (SearchStax-side — no public Acquia doc; the SearchStudio UI does this by hand) | `provision` |
+| [Enabling the module + routing through SearchStudio](https://docs.acquia.com/acquia-cloud-platform/enabling-searchstax-module-and-routing-searches-through-it) | `configure`, `route` |
+| [Migrating the server](https://docs.acquia.com/acquia-cloud-platform/migrating-server-drupal-acquia-search-powered-searchstax) | `server` |
+| (no Acquia doc — SearchStax installs the config set on the collection) | `solrconfig` |
+| [Migrating the index](https://docs.acquia.com/acquia-cloud-platform/migrating-index-drupal-acquia-search-powered-searchstax) | `index` |
+| [Migrating the views](https://docs.acquia.com/acquia-cloud-platform/migrating-views-drupal-acquia-search-powered-searchstax) | `views` |
+| [Multi-site, single SearchStax app](https://docs.acquia.com/acquia-cloud-platform/multi-site-configuration-single-searchstax-app) | every mutating phase re-runs per `--uri`; see [Multisite → SearchStax apps](#multisite--searchstax-apps) |
+| [Validating the search page](https://docs.acquia.com/acquia-cloud-platform/validating-search-page) | `validate` |
+| [Committing and deploying changes](https://docs.acquia.com/acquia-cloud-platform/committing-and-deploying-changes) | `handoff` |
+| [Removing legacy module + config](https://docs.acquia.com/acquia-cloud-platform/removing-legacy-search-module-and-configuration) | `cleanup` |
+| [Executing the rollback if required](https://docs.acquia.com/acquia-cloud-platform/executing-rollback-if-required) | none — manual, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
+
+`./srsx-migrate explain <phase>` prints the matching URL from the terminal.
+
 ## `preflight`
 
 | What                         | How                                                                |
@@ -20,21 +42,61 @@ Exits non-zero on Drupal 7, Drush <11, or failed bootstrap.
 
 ## `install`
 
+This phase changes your **local repository** and then waits for you to deploy it.
+It is the only phase that commits and pushes code.
+
+It first offers a skip ("the modules are already installed and deployed"), then
+optionally pins `drupal/searchstax` to a version you choose:
+
 ```bash
-composer require drupal/searchstax:^1.11 drupal/search_api_solr:^4 drupal/key:^1
-drush en -y searchstax solr_to_searchstax_ss_migration search_api_solr key
+composer require drupal/search_api:^1 drupal/search_api_solr:^4 drupal/searchstax drupal/key:^1
+```
+
+Every package is then verified individually and the phase aborts if any is
+missing. Next it stages the result — `composer.json`, `composer.lock`, and the
+built code directories (`vendor/`, `docroot|web/core`, `modules/contrib`,
+`themes/contrib`, `profiles/contrib`, `libraries`) are force-added so the deploy
+is complete via git alone — and:
+
+```bash
+git commit -m "Search: install SearchStax migration modules"
+git push origin <branch-you-choose>
+```
+
+It then **stops and asks you to deploy that branch to the target environment in
+the Acquia Cloud UI** (pushing a branch does not auto-deploy on ACSF), and waits
+for you to confirm the deploy finished. Only then does it enable the modules,
+per site:
+
+```bash
+drush updb -y
+drush cr
+drush en -y search_api search_api_solr searchstax solr_to_searchstax_ss_migration key
 drush cr
 ```
 
-Per site under multisite, the `drush` half is repeated with `--uri=…`.
+If the push fails, the phase says so plainly and does not let you claim a deploy
+happened. If any site fails to enable the modules, the phase is left un-done so
+you can re-run it.
 
 ## `backup`
 
-```bash
-acli api:environments:database-backup-create ${ACQUIA_APP}.${ACQUIA_TARGET_ENV} default
+**This phase does not create a backup. You do.**
+
+It prints instructions, then blocks on a confirmation:
+
+```
+  1. Open the Acquia Cloud UI for <app>.<env>.
+  2. Trigger an on-demand backup of the <env> database and wait for it to finish.
+
+Have you triggered an on-demand backup of the <env> DB and confirmed it finished? [y/N]
 ```
 
-That's the entire phase. Acquia takes nightly backups already; this just adds an on-demand snapshot at exactly the pre-migration moment so you have a known-good restore point.
+The toolkit runs no `acli` or `drush` command here and has no way to verify your
+answer. If you answer yes without taking the backup, you have no restore point —
+and every phase after this one mutates the environment.
+
+It runs before `install` deliberately, so the snapshot predates the first change.
 
 **There is no automated rollback.** If anything goes wrong on dev/stage, restore the DB with `acli pull:db` and `git revert` the migration commit. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the exact steps.
 
@@ -46,7 +108,7 @@ Creates the SearchStax Site Search app(s) the migration will point at, via the S
 - Every app endpoint is already set in `migration.env` or the environment (e.g. your TAM already provisioned the app[s])
 - You answer "no, I already have one" at the first prompt
 
-For a multisite, the number of apps to create comes from the site→app topology (subject to the 9-sites-per-app cap) — see [MAPPING.md → Multisite → SearchStax apps](MAPPING.md#multisite--searchstax-apps).
+For a multisite, the number of apps to create comes from the site→app topology (subject to the 9-sites-per-app cap) — see [Multisite → SearchStax apps](#multisite--searchstax-apps).
 
 Otherwise the flow is:
 
@@ -231,7 +293,7 @@ deploy the change up to dev → stage → prod.
 
 ## `cleanup`
 
-Takes another snapshot first (`pre-cleanup`). Then:
+Refuses to run without an explicit confirmation, then per site:
 
 ```bash
 drush pmu -y solr_to_searchstax_ss_migration acquia_search acquia_connector
@@ -243,8 +305,67 @@ If `KEEP_ACQUIA_SEARCH_IN_COMPOSER=1` is set in `migration.env`, the `composer r
 
 ---
 
-**Next:** [DEMO.md](DEMO.md) — running the toolkit with no real environment.
+## Multisite → SearchStax apps
+
+When you tell the wizard you run a Drupal multisite (a comma-separated `SITES`
+list), the toolkit maps those sites onto one or more SearchStax apps.
+
+**Hard limit: a single SearchStax app holds at most 9 sites.** The minimum
+number of apps is therefore `ceil(N / 9)` — 1–9 sites need 1 app, 10 sites need
+2, 100 sites need 12.
+
+The `provision` phase (or `configure`, if you already have apps) asks **how many
+apps** you want:
+
+- **Default — fewest apps.** Sites are packed up to 9 per app. Recommended, and
+  needs no per-site input.
+- **More apps (optional).** Choose a larger number only when you want finer
+  separation (for example, one important site on its own app). You then assign
+  each site to an app; every app must hold 1–9 sites.
+
+The mapping is persisted to `migration.env` as `SEARCHSTAX_APP_COUNT` and
+`SITE_APP_MAP` (e.g. `SITE_APP_MAP="https://a=1,https://b=1,https://c=2"`).
+Per-app credentials are stored suffixed `_1.._K`
+(`SEARCHSTAX_APP_ENDPOINT_2`, `SEARCHSTAX_READ_TOKEN_2`, …); app 1 also mirrors
+the unsuffixed `SEARCHSTAX_*` vars for single-app compatibility. `migration.env`
+is git-ignored, so tokens stored there are never committed.
+
+Each per-site phase (`server`, `index`, `route`, `validate`) resolves the app for
+the current `--uri` and uses that app's endpoint and tokens. Sites that **share**
+an app are namespaced with a per-site `index_prefix` (via
+[set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) so
+"results from this site only" filtering works.
+
+> **Handoff caveat (multisite).** `handoff` currently exports config for the
+> default site only. Each additional site keeps its own config and must be
+> exported per `--uri` into its own config sync directory before deploy — the
+> handoff summary prints the exact `drush --uri=<site> config:export` commands.
+> Automating per-site export is a planned follow-up.
+
+## Verified against module version
+
+Verified against `drupal/searchstax` 1.11.0:
+
+- Module machine name: `searchstax` (not `searchstax_studio`)
+- Submodule: `solr_to_searchstax_ss_migration`
+- Config object: `searchstax.settings`
+- Config keys (from `searchstax.schema.yml`): `searches_via_searchstudio`,
+  `configure_via_searchstudio`, `analytics_url`, `analytics_key`, `key_id`
+
+The toolkit deliberately does **not** call `drush searchstax:*` commands: they
+only exist from 1.12.0, and the 1.9.x releases many customers run ship the
+submodule with `solr_to_searchstax_ss_migration.utility` as their only service.
+Every helper in `lib/php-eval/` therefore prefers the module's service when it
+exists and implements the same work inline when it does not.
+
+If your installed `drupal/searchstax` is newer and the schema has changed,
+[tests/check-config-keys.sh](../tests/check-config-keys.sh) will tell you on
+`make check`.
+
+---
+
 **Previous:** [QUICKSTART.md](QUICKSTART.md)
+**Next:** [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 **Up:** [README](../README.md)
 
 — *Maintained by Mohammad Zomorodian, Acquia Inc.*
