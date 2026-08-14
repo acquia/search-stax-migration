@@ -37,8 +37,11 @@ This toolkit tracks the [official runbook](https://docs.acquia.com/acquia-cloud-
 | Search-API server inventory  | `drush sapi-s --format=json` → `artifacts/inventory-<ts>/servers.json` |
 | Search-API index inventory   | `drush sapi-i --format=json` → `artifacts/inventory-<ts>/indexes.json` |
 | Enabled module list          | `drush pm:list --type=module --status=enabled --format=json`       |
+| **Source search health**     | `lib/php-eval/preflight-search-health.php` — per site, per server: does it resolve to a server URL, does that URL answer, and does it hold an index? |
 
 Exits non-zero on Drupal 7, Drush <11, or failed bootstrap.
+
+**Why this runs first.** The toolkit migrates an existing, working search: a site with no core assigned, or no index attached, has nothing to copy. Checking in preflight means that is caught before `install` changes the repository and `provision` creates SearchStax apps. Each server is reported as `ok`, `no-servers`, `no-url`, `unreachable`, `no-indexes`, or `not-solr`; anything other than `ok` or `not-solr` is listed by site and server, and must be acknowledged before the run continues.
 
 ## `install`
 

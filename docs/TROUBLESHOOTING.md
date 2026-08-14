@@ -29,6 +29,25 @@ The toolkit can't reach Drupal on the target Acquia env. In order:
 2. Confirm `ACQUIA_APP` and `ACQUIA_TARGET_ENV` are correct in `migration.env` (or re-run `./srsx-migrate init`).
 3. Check standalone: `acli remote:drush ${ACQUIA_APP}.${ACQUIA_TARGET_ENV} -- status`. If that fails, it's an Acquia/Drupal config issue — fix that before re-running the toolkit.
 
+## Phase `preflight` reports a search health problem
+
+This toolkit migrates an existing, working Search API setup. The preflight check confirms that each site's current search server resolves to a URL, answers, and has at least one index attached. What each result means:
+
+| Reported | Meaning | Where to look |
+| --- | --- | --- |
+| `no Search API server exists` | This site has no search server configured, so there is nothing to migrate. | Confirm the site belongs in `SITES`. |
+| `resolves to no server URL` | The server has no core assigned, so search on this site is not currently working. | Acquia Search subscription status, and `/admin/config/search/search-api` — does the server show a core? |
+| `server URL does not answer` | A core is assigned but the endpoint did not respond. | The URL is printed above; verify network access and subscription status. |
+| `reachable but holds no index` | The server responds but no index is attached to it. | `./srsx-migrate doctor` reports what each index is attached to. |
+
+Resolve the search configuration on the affected site(s), then re-run:
+
+```bash
+./srsx-migrate preflight --force
+```
+
+You can continue past this warning, but later phases assume a working source search, so the run is likely to stop once it reaches `solrconfig`.
+
 ## Phase `server` says "Server config did not import cleanly"
 
 The script offers a manual UI fallback. Visit `/admin/config/search/solr-to-searchstax-ss-migration` on the target env and complete the [Migrating the server](https://docs.acquia.com/acquia-cloud-platform/migrating-server-drupal-acquia-search-powered-searchstax) page by hand. Then continue with `./srsx-migrate index --force` (the `--force` re-runs `server` past its done marker if needed).

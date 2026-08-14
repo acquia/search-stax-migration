@@ -54,6 +54,7 @@ FILES=(
   "lib/php-eval/inspect-index-topology.php"
   "lib/php-eval/inspect-service-class.php"
   "lib/php-eval/list-migrated-views.php"
+  "lib/php-eval/preflight-search-health.php"
   "lib/php-eval/searchstax-configure-app.php"
   "lib/php-eval/switch-view-index.php"
   "lib/php-eval/set-multisite-prefix.php"

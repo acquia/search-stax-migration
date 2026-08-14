@@ -56,6 +56,7 @@ test:
 	@bash tests/test-index-detection.sh
 	@bash tests/test-clone-index.sh
 	@bash tests/test-inspect-acquia-search-cores.sh
+	@bash tests/test-preflight-search-health.sh
 	@bash tests/test-loop-stdin.sh
 
 demo:

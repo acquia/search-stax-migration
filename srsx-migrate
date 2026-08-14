@@ -1506,6 +1506,13 @@ phase_preflight() {
   SRSX_NEEDS_INSTALL=0
   for_each_site _phase_preflight_inventory
 
+  # Does the search this migration reads FROM actually work? A broken source
+  # otherwise surfaces around 'solrconfig', by which point install has pushed
+  # code and provision has created real SearchStax apps.
+  SRSX_HEALTH_PROBLEMS=()
+  for_each_site _phase_preflight_search_health
+  _report_search_health
+
   # module-installed is a codebase-wide optimisation hint: only claim it if
   # every site already has the searchstax module enabled.
   if [[ "${SRSX_NEEDS_INSTALL:-0}" == "0" ]]; then
@@ -1587,6 +1594,74 @@ _phase_preflight_inventory() {
   drush sapi-rt || warn "sapi-rt failed${DRUSH_URI:+ for ${DRUSH_URI}}"
   drush sapi-i  || warn "sapi-i failed${DRUSH_URI:+ for ${DRUSH_URI}}"
   drush sapi-s  || warn "sapi-s failed${DRUSH_URI:+ for ${DRUSH_URI}}"
+}
+
+# Check the current site's search server URL + that it holds an index. Failures
+# are collected into SRSX_HEALTH_PROBLEMS rather than raised, so the operator
+# sees every site's verdict before deciding whether to continue.
+declare -a SRSX_HEALTH_PROBLEMS=()
+_phase_preflight_search_health() {
+  local site="${DRUSH_URI:-default}" out=""
+
+  if [[ "$DRY_RUN" == "1" || "$DEMO" == "1" ]]; then
+    audit "drush php:script preflight-search-health.php  # server URL + index check"
+    ok "Search health checked (demo)."
+    return 0
+  fi
+
+  out="$(drush_php_soft preflight-search-health.php 2>&1)" || out=""
+  if [[ -z "$out" ]]; then
+    warn "Could not check search health${DRUSH_URI:+ on ${site}}."
+    return 0
+  fi
+  printf '%s\n' "$out" | grep -v '^\[srsx-' || true
+
+  # A site is healthy when at least one Solr server resolves, answers, and
+  # holds an index; anything else is a reason this run will fail later.
+  local state id url count healthy=0
+  while IFS=$'\t' read -r _ state id url count; do
+    case "$state" in
+      ok)          healthy=1 ;;
+      no-servers)  SRSX_HEALTH_PROBLEMS+=("${site}"$'\t'"search_api"$'\t'"no Search API server exists — there is nothing to migrate") ;;
+      no-url)      SRSX_HEALTH_PROBLEMS+=("${site}"$'\t'"${id}"$'\t'"resolves to no server URL — search here is already broken") ;;
+      unreachable) SRSX_HEALTH_PROBLEMS+=("${site}"$'\t'"${id}"$'\t'"server URL does not answer: ${url}") ;;
+      no-indexes)  SRSX_HEALTH_PROBLEMS+=("${site}"$'\t'"${id}"$'\t'"reachable but holds no index — there is nothing to migrate") ;;
+    esac
+  done < <(awk -F'\t' '$1=="[srsx-health]"' <<<"$out")
+
+  if (( healthy == 1 )); then
+    ok "Search health${DRUSH_URI:+ on ${site}}: a reachable server with at least one index."
+  fi
+  return 0
+}
+
+# Print the collected health verdicts and make the operator acknowledge any
+# problem before install/provision spend anything.
+_report_search_health() {
+  (( ${#SRSX_HEALTH_PROBLEMS[@]} == 0 )) && return 0
+
+  local row site id why
+  warn ""
+  warn "── Search health: problems found ─────────────────────────────────────"
+  for row in "${SRSX_HEALTH_PROBLEMS[@]}"; do
+    IFS=$'\t' read -r site id why <<< "$row"
+    warn "  [${site}] ${id}: ${why}"
+  done
+  warn "──────────────────────────────────────────────────────────────────────"
+  cat <<EOF
+
+  This toolkit migrates an existing, working search. Where a site's current
+  search is not working there is nothing to copy, and later phases assume a
+  working source, so the run is likely to stop once it reaches 'solrconfig'.
+
+  Check the affected site(s) — the Acquia Search subscription, and whether the
+  server has a core assigned, at
+    /admin/config/search/search-api
+  then re-run:  ./srsx-migrate preflight --force
+
+EOF
+  confirm "Continue anyway? (only if you know these site(s) are expected to look like this)"
+  return 0
 }
 
 # =============================================================================
