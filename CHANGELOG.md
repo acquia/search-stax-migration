@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Multisite installs sharing one SearchStax app were not isolated from each
+  other. The server's "Retrieve results for this site only" option
+  (`site_hash`) was never turned on, "Index items immediately"
+  (`index_directly`) was left on for copied indexes, and the per-site
+  `index_prefix` was written to the index's options bag instead of
+  `third_party_settings.search_api_solr.advanced`, where `search_api_solr`
+  actually reads it — so the prefix silently had no effect. Also fixed
+  `_ssx_site_prefix()` to derive the prefix from the site's first hostname
+  label (e.g. `dmv` for `dmv.dev-nhdoit.acsitefactory.com`) instead of
+  slugifying the entire host.
 - **Documentation claimed the `backup` phase created a database backup. It does
   not** — it prints instructions and blocks on a confirmation it cannot verify.
   README, QUICKSTART, PHASES, and SECURITY all said otherwise. Corrected
