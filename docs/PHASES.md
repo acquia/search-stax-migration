@@ -335,9 +335,20 @@ is git-ignored, so tokens stored there are never committed.
 
 Each per-site phase (`server`, `index`, `route`, `validate`) resolves the app for
 the current `--uri` and uses that app's endpoint and tokens. Sites that **share**
-an app are namespaced with a per-site `index_prefix` (via
-[set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) so
-"results from this site only" filtering works.
+an app get three settings so they don't step on each other:
+
+- A per-site `index_prefix` (via
+  [set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)),
+  namespacing each site's documents on the shared Solr index.
+- The server's "Retrieve results for this site only" option (`site_hash`,
+  set by [create-server.php](../lib/php-eval/create-server.php)), so a query
+  from one site never returns another site's documents.
+- "Index items immediately" turned off (`index_directly`, set by
+  [clone-index.php](../lib/php-eval/clone-index.php)) on each copied index,
+  so per-save indexing from one site doesn't pile write load onto an app the
+  other sites are also hitting.
+
+All three are skipped when a site has its own dedicated app.
 
 > **Handoff caveat (multisite).** `handoff` currently exports config for the
 > default site only. Each additional site keeps its own config and must be

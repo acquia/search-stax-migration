@@ -1170,14 +1170,30 @@ _sites_for_app() {
   printf '%s' "$out"
 }
 
-# Derive a stable Solr index_prefix slug from a site --uri. Strips scheme,
-# keeps [A-Za-z0-9_], and appends '_' as a namespace separator.
+# Derive a stable Solr index_prefix slug from a site --uri. Takes the first
+# label of the host (e.g. dmv.dev-nhdoit.acsitefactory.com -> dmv), skipping
+# a leading 'www' label, keeps [A-Za-z0-9_], and appends '_' as a namespace
+# separator.
 _ssx_site_prefix() {
   local uri="$1"
   local host="${uri#*://}"; host="${host%%/*}"
-  local slug; slug="$(printf '%s' "$host" | tr -c 'A-Za-z0-9_' '_')"
+  local label="${host%%.*}"
+  if [[ "$label" == "www" && "$host" == *.*.* ]]; then
+    host="${host#*.}"
+    label="${host%%.*}"
+  fi
+  local slug; slug="$(printf '%s' "$label" | tr -c 'A-Za-z0-9_' '_')"
   slug="${slug%_}"
   printf '%s_' "$slug"
+}
+
+# True when the current --uri is part of a multisite sharing one SearchStax
+# app (SITES_ARR populated and a DRUSH_URI is active). Sites in this mode need
+# per-site namespacing (index_prefix), the server's "results for this site
+# only" filter (site_hash), and delayed indexing (index_directly off) so one
+# site's writes don't hammer an app shared by others.
+_srsx_multisite_shared_app_active() {
+  (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]
 }
 
 # Decompose a SearchStax Solr endpoint into what the module's connector stores.
@@ -2415,7 +2431,8 @@ _phase_server_site() {
     "SRSX_UPDATE_ENDPOINT=${SRSX_EP_UPDATE}" \
     "SRSX_UPDATE_TOKEN=$(_ssx_update_token "$ai")" \
     "SRSX_AUTOSUGGEST_ENDPOINT=$(ssx_app_field "$ai" AUTOSUGGEST_ENDPOINT)" \
-    "SRSX_CONNECTOR=${SEARCHSTAX_CONNECTOR:-}"
+    "SRSX_CONNECTOR=${SEARCHSTAX_CONNECTOR:-}" \
+    "SRSX_SITE_HASH=$(_srsx_multisite_shared_app_active && echo 1 || echo 0)"
 
   drush_cr
   # Verify
@@ -2471,7 +2488,7 @@ _phase_index_site() {
   # Multisite: namespace each site's documents with a per-site index_prefix so
   # sites sharing one SearchStax app can filter to "this site only". Harmless
   # when a site has its own app.
-  if (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]; then
+  if _srsx_multisite_shared_app_active; then
     local prefix; prefix="$(_ssx_site_prefix "$DRUSH_URI")"
     info "Setting index_prefix '${prefix}' for ${DRUSH_URI}"
     drush_php set-multisite-prefix.php \
@@ -2566,7 +2583,8 @@ _phase_index_copy() {
         ;;
       legacy)
         site_step "copy index '${idx}' (from ${srv})" \
-          drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}"
+          drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}" \
+            "SRSX_MULTISITE_SHARED=$(_srsx_multisite_shared_app_active && echo 1 || echo 0)"
         copied=1
         ;;
       other)
@@ -2596,7 +2614,8 @@ _phase_index_copy() {
         ;;
       *)
         site_step "copy index '${forced}' (forced, ${forced_cls})" \
-          drush_php_soft clone-index.php "SRSX_INDEX_ID=${forced}" "SRSX_NEW_SERVER_ID=${server_id}"
+          drush_php_soft clone-index.php "SRSX_INDEX_ID=${forced}" "SRSX_NEW_SERVER_ID=${server_id}" \
+            "SRSX_MULTISITE_SHARED=$(_srsx_multisite_shared_app_active && echo 1 || echo 0)"
         copied=1
         ;;
     esac

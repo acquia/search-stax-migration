@@ -29,9 +29,13 @@ foreach ($indexStorage->loadMultiple() as $idx) {
   if ($idx->getServerId() !== $server_id) {
     continue;
   }
-  $opts = $idx->getOptions();
-  $opts['index_prefix'] = $prefix;
-  $idx->setOptions($opts);
+  // search_api_solr reads index_prefix from third-party settings
+  // (Utility::getIndexSolrSettings() / SearchApiSolrBackend::getIndexId()),
+  // not from the index's options bag — merge into 'advanced' so sibling keys
+  // like 'collection' and 'timezone' survive.
+  $advanced = $idx->getThirdPartySetting('search_api_solr', 'advanced') ?? [];
+  $advanced['index_prefix'] = $prefix;
+  $idx->setThirdPartySetting('search_api_solr', 'advanced', $advanced);
   $idx->save();
   $count++;
   fwrite(STDOUT, "[set-multisite-prefix] {$idx->id()} prefix='{$prefix}'\n");
