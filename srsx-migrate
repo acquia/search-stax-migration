@@ -1170,14 +1170,72 @@ _sites_for_app() {
   printf '%s' "$out"
 }
 
-# Derive a stable Solr index_prefix slug from a site --uri. Strips scheme,
-# keeps [A-Za-z0-9_], and appends '_' as a namespace separator.
+# Derive a stable Solr index_prefix slug from a site --uri. Takes the first
+# label of the host (e.g. dmv.dev-nhdoit.acsitefactory.com -> dmv), skipping
+# a leading 'www' label, keeps [A-Za-z0-9_], and appends '_' as a namespace
+# separator.
 _ssx_site_prefix() {
+  local uri="$1"
+  local host="${uri#*://}"; host="${host%%/*}"
+  local label="${host%%.*}"
+  if [[ "$label" == "www" && "$host" == *.*.* ]]; then
+    host="${host#*.}"
+    label="${host%%.*}"
+  fi
+  local slug; slug="$(printf '%s' "$label" | tr -c 'A-Za-z0-9_' '_')"
+  slug="${slug%_}"
+  printf '%s_' "$slug"
+}
+
+# Slug of the whole host. Collision-free by construction, so it is the fallback
+# whenever the short first-label form is not.
+_ssx_site_prefix_full() {
   local uri="$1"
   local host="${uri#*://}"; host="${host%%/*}"
   local slug; slug="$(printf '%s' "$host" | tr -c 'A-Za-z0-9_' '_')"
   slug="${slug%_}"
   printf '%s_' "$slug"
+}
+
+# True when two sites in SITES_ARR reduce to the same short prefix, e.g.
+# dmv.dev-nhdoit.acsitefactory.com and dmv.nhdoit.acsitefactory.com, or
+# www.example.com and example.org.
+_ssx_site_prefixes_collide() {
+  (( ${#SITES_ARR[@]} > 1 )) || return 1
+  local s p seen=","
+  for s in "${SITES_ARR[@]}"; do
+    p="$(_ssx_site_prefix "$s")"
+    [[ "$seen" == *",${p},"* ]] && return 0
+    seen+="${p},"
+  done
+  return 1
+}
+
+# Resolve the index_prefix for a site. Prefers the readable short form, but
+# falls back to full-host slugs for EVERY site as soon as any two would
+# collide: a shared prefix silently re-merges the documents the prefix exists
+# to keep apart, so readability loses.
+_ssx_resolve_site_prefix() {
+  local uri="$1"
+  if _ssx_site_prefixes_collide; then
+    _ssx_site_prefix_full "$uri"
+  else
+    _ssx_site_prefix "$uri"
+  fi
+}
+
+# True when this run is per-site (multisite with an active --uri). index_prefix
+# and site_hash apply to every such site: namespacing documents and filtering
+# to "this site only" are correct whether or not the app is shared.
+_srsx_multisite_active() {
+  (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]
+}
+
+# Whether to turn "Index items immediately" off on a copied index. Per-save
+# indexing pushes customers over their SearchStax entitlement, so cron-based
+# indexing is the default for every migrated index, single-site included.
+_srsx_index_directly_off() {
+  [[ "${SRSX_KEEP_INDEX_DIRECTLY:-0}" != "1" ]]
 }
 
 # Decompose a SearchStax Solr endpoint into what the module's connector stores.
@@ -2415,7 +2473,8 @@ _phase_server_site() {
     "SRSX_UPDATE_ENDPOINT=${SRSX_EP_UPDATE}" \
     "SRSX_UPDATE_TOKEN=$(_ssx_update_token "$ai")" \
     "SRSX_AUTOSUGGEST_ENDPOINT=$(ssx_app_field "$ai" AUTOSUGGEST_ENDPOINT)" \
-    "SRSX_CONNECTOR=${SEARCHSTAX_CONNECTOR:-}"
+    "SRSX_CONNECTOR=${SEARCHSTAX_CONNECTOR:-}" \
+    "SRSX_SITE_HASH=$(_srsx_multisite_active && echo 1 || echo '')"
 
   drush_cr
   # Verify
@@ -2469,10 +2528,13 @@ _phase_index_site() {
   fi
 
   # Multisite: namespace each site's documents with a per-site index_prefix so
-  # sites sharing one SearchStax app can filter to "this site only". Harmless
-  # when a site has its own app.
-  if (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]; then
-    local prefix; prefix="$(_ssx_site_prefix "$DRUSH_URI")"
+  # a query can be filtered to "this site only". Harmless when a site has its
+  # own app.
+  if _srsx_multisite_active; then
+    local prefix; prefix="$(_ssx_resolve_site_prefix "$DRUSH_URI")"
+    if _ssx_site_prefixes_collide; then
+      warn "Two sites reduce to the same short index_prefix; using full-host prefixes."
+    fi
     info "Setting index_prefix '${prefix}' for ${DRUSH_URI}"
     drush_php set-multisite-prefix.php \
       "SRSX_PREFIX=${prefix}" \
@@ -2566,7 +2628,8 @@ _phase_index_copy() {
         ;;
       legacy)
         site_step "copy index '${idx}' (from ${srv})" \
-          drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}"
+          drush_php_soft clone-index.php "SRSX_INDEX_ID=${idx}" "SRSX_NEW_SERVER_ID=${server_id}" \
+            "SRSX_INDEX_DIRECTLY_OFF=$(_srsx_index_directly_off && echo 1 || echo 0)"
         copied=1
         ;;
       other)
@@ -2596,7 +2659,8 @@ _phase_index_copy() {
         ;;
       *)
         site_step "copy index '${forced}' (forced, ${forced_cls})" \
-          drush_php_soft clone-index.php "SRSX_INDEX_ID=${forced}" "SRSX_NEW_SERVER_ID=${server_id}"
+          drush_php_soft clone-index.php "SRSX_INDEX_ID=${forced}" "SRSX_NEW_SERVER_ID=${server_id}" \
+            "SRSX_INDEX_DIRECTLY_OFF=$(_srsx_index_directly_off && echo 1 || echo 0)"
         copied=1
         ;;
     esac
