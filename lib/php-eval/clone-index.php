@@ -17,8 +17,8 @@
  * is not in the module's migrated_servers map — including one with no server.
  *
  * SRSX_INDEX_DIRECTLY_OFF=1 turns off "Index items immediately" on the copy,
- * batching indexing to cron. srsx-migrate only sets it for sites that share a
- * SearchStax app, since it trades search freshness for batched writes.
+ * batching indexing to cron. srsx-migrate sets it by default: per-save
+ * indexing pushes customers over their SearchStax entitlement.
  *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
@@ -69,7 +69,7 @@ if (\Drupal::hasService('solr_to_searchstax_ss_migration.migration_helper')) {
     $opts['index_directly'] = FALSE;
     $newIndex->setOptions($opts);
     $newIndex->save();
-    fwrite(STDOUT, "[clone-index] index_directly disabled (shared SearchStax app)\n");
+    fwrite(STDOUT, "[clone-index] index_directly disabled (indexing runs on cron)\n");
   }
   fwrite(STDOUT, "[clone-index] OK {$indexId} -> {$newIndex->id()}\n");
   return 0;
@@ -98,7 +98,7 @@ $values['description'] = 'Copy of index ' . $index->label() . '.';
 $values['server'] = $serverId;
 if ($indexDirectlyOff) {
   $values['options']['index_directly'] = FALSE;
-  fwrite(STDOUT, "[clone-index] index_directly disabled (shared SearchStax app)\n");
+  fwrite(STDOUT, "[clone-index] index_directly disabled (indexing runs on cron)\n");
 }
 
 $newIndex = $indexStorage->create($values);

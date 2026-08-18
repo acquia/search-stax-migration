@@ -6,10 +6,9 @@
 #
 #   A) _srsx_multisite_active   — true for ANY multisite site (index_prefix,
 #      site_hash), false single-site.
-#   B) _srsx_shared_app_active  — true ONLY when SITE_APP_MAP puts another site
-#      on the same app. A 1:1 topology must NOT look "shared": index_directly
-#      trades search freshness for batching and has no upside on a dedicated
-#      app. SRSX_KEEP_INDEX_DIRECTLY=1 overrides it.
+#   B) _srsx_index_directly_off — true for EVERY migrated index regardless of
+#      site count or app topology, because per-save indexing pushes customers
+#      over their SearchStax entitlement. SRSX_KEEP_INDEX_DIRECTLY=1 overrides.
 #   C) _ssx_resolve_site_prefix — short first-label prefixes are readable but
 #      not unique (dmv.dev-nhdoit… and dmv.nhdoit…, www.example.com and
 #      example.org). A shared prefix silently re-merges what the prefix exists
@@ -37,7 +36,7 @@ awk '/^_site_app_index\(\) \{/{f=1}
      f' srsx-migrate > "$helpers"
 for fn in _site_app_index _sites_for_app _ssx_site_prefix _ssx_site_prefix_full \
           _ssx_site_prefixes_collide _ssx_resolve_site_prefix \
-          _srsx_multisite_active _srsx_shared_app_active _srsx_index_directly_off; do
+          _srsx_multisite_active _srsx_index_directly_off; do
   grep -q "^${fn}() {" "$helpers" || fail "helper extraction missed ${fn}()"
 done
 
@@ -60,35 +59,32 @@ is_true _srsx_multisite_active
 echo "  multisite run with an active --uri is multisite OK"
 
 # ---------------------------------------------------------------------------
-# B — shared-app gate. This is the one the old code got wrong: it reported
-#     "shared" for every multisite site, including a 1:1 topology.
+# B — index_directly. Off for every migrated index: the driver is the customer's
+#     SearchStax entitlement, not app topology, so single-site and 1:1 runs get
+#     it too.
 # ---------------------------------------------------------------------------
+SITES_ARR=(); DRUSH_URI=""; SITE_APP_MAP=""
+is_true _srsx_index_directly_off
+echo "  single-site run still turns index_directly off OK"
+
 SITES_ARR=("https://a.example.com" "https://b.example.com" "https://c.example.com")
 SITE_APP_MAP="https://a.example.com=1,https://b.example.com=2,https://c.example.com=3"
 for u in "${SITES_ARR[@]}"; do
   DRUSH_URI="$u"
-  is_false _srsx_shared_app_active
-  is_false _srsx_index_directly_off
+  is_true _srsx_index_directly_off
 done
-echo "  1:1 site-to-app topology is not treated as shared OK"
+echo "  1:1 site-to-app topology turns index_directly off OK"
 
 SITE_APP_MAP="https://a.example.com=1,https://b.example.com=1,https://c.example.com=2"
-DRUSH_URI="https://a.example.com"; is_true _srsx_shared_app_active
-DRUSH_URI="https://b.example.com"; is_true _srsx_shared_app_active
-DRUSH_URI="https://c.example.com"; is_false _srsx_shared_app_active
-echo "  sites packed onto one app are shared, the lone site is not OK"
-
 DRUSH_URI="https://a.example.com"
 is_true _srsx_index_directly_off
 # An assignment prefix on a function call persists in bash, so set and unset.
 SRSX_KEEP_INDEX_DIRECTLY=1
 is_false _srsx_index_directly_off
 unset SRSX_KEEP_INDEX_DIRECTLY
-echo "  SRSX_KEEP_INDEX_DIRECTLY=1 overrides the shared-app default OK"
+echo "  SRSX_KEEP_INDEX_DIRECTLY=1 is the only way to keep it on OK"
 
 SITES_ARR=(); DRUSH_URI=""; SITE_APP_MAP=""
-is_false _srsx_shared_app_active
-echo "  single-site run never disables index_directly OK"
 
 # ---------------------------------------------------------------------------
 # C — prefix derivation and collision fallback

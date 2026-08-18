@@ -52,14 +52,16 @@ You can continue past this warning, but later phases assume a working source sea
 
 The script offers a manual UI fallback. Visit `/admin/config/search/solr-to-searchstax-ss-migration` on the target env and complete the [Migrating the server](https://docs.acquia.com/acquia-cloud-platform/migrating-server-drupal-acquia-search-powered-searchstax) page by hand. Then continue with `./srsx-migrate index --force` (the `--force` re-runs `server` past its done marker if needed).
 
-## Multisite: content isn't searchable until cron runs
+## Content isn't searchable until cron runs
 
-Expected on sites that **share** a SearchStax app. The `index` phase turns off
-"Index items immediately" (`index_directly`) on their copied indexes so sibling
-sites don't send concurrent per-save writes to the same app; indexing happens on
-cron instead. Sites with a dedicated app are not touched.
+Expected, and deliberate. The `index` phase turns off "Index items immediately"
+(`index_directly`) on every copied index: indexing on each node save drives
+customers over their SearchStax entitlement and is not the recommended pattern
+on Acquia, so indexing runs on cron instead. This applies to single-site
+installs as much as multisite.
 
-If a site needs a saved node to be searchable at once, re-run with the override:
+If a site genuinely needs a saved node to be searchable at once, re-run with the
+override:
 
 ```bash
 SRSX_KEEP_INDEX_DIRECTLY=1 ./srsx-migrate index --force

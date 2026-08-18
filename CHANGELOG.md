@@ -22,11 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix would silently undo the separation the prefix exists to provide.
 
 ### Changed
-- Copied indexes on sites that **share** a SearchStax app now have "Index items
-  immediately" (`index_directly`) turned off, batching indexing to cron so
-  concurrent per-save writes from sibling sites don't pile onto one app. This
-  delays when saved content becomes searchable; set `SRSX_KEEP_INDEX_DIRECTLY=1`
-  to opt out. Sites with a dedicated app are left alone.
+- Copied indexes now have "Index items immediately" (`index_directly`) turned
+  off, so indexing runs on cron. Indexing on every node save drives customers
+  over their SearchStax entitlement and is not the recommended pattern on
+  Acquia. This applies to single-site installs as much as multisite, and delays
+  when saved content becomes searchable; set `SRSX_KEEP_INDEX_DIRECTLY=1` to opt
+  out.
 
 ### Upgrade notes
 - Already-migrated sites: `clone-index.php` skips indexes it has already copied,

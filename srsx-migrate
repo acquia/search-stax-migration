@@ -1231,21 +1231,11 @@ _srsx_multisite_active() {
   (( ${#SITES_ARR[@]} > 0 )) && [[ -n "$DRUSH_URI" ]]
 }
 
-# True only when this site actually shares its SearchStax app with another
-# site, per SITE_APP_MAP.
-_srsx_shared_app_active() {
-  _srsx_multisite_active || return 1
-  [[ "$(_sites_for_app "$(_site_app_index "$DRUSH_URI")")" == *,* ]]
-}
-
-# Whether to turn "Index items immediately" off on a copied index. Doing so
-# delays indexing to cron, so it is limited to shared apps — where batching
-# actually buys something — and is overridable.
+# Whether to turn "Index items immediately" off on a copied index. Per-save
+# indexing pushes customers over their SearchStax entitlement, so cron-based
+# indexing is the default for every migrated index, single-site included.
 _srsx_index_directly_off() {
-  if [[ "${SRSX_KEEP_INDEX_DIRECTLY:-0}" == "1" ]]; then
-    return 1
-  fi
-  _srsx_shared_app_active
+  [[ "${SRSX_KEEP_INDEX_DIRECTLY:-0}" != "1" ]]
 }
 
 # Decompose a SearchStax Solr endpoint into what the module's connector stores.
