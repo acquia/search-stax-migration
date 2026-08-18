@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-18
+
 ### Fixed
 - **Documentation claimed the `backup` phase created a database backup. It does
   not** — it prints instructions and blocks on a confirmation it cannot verify.
@@ -66,4 +68,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documentation set: README, QUICKSTART, PHASES, SECURITY, TROUBLESHOOTING.
 - GitHub issue / PR templates and a CI workflow running `bash -n` + `shellcheck`.
 
-[Unreleased]: https://github.com/acquia/search-stax-migration/compare/HEAD...HEAD
+[Unreleased]: https://github.com/acquia/search-stax-migration/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/acquia/search-stax-migration/releases/tag/v1.0.0
