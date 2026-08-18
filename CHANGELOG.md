@@ -8,16 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- Multisite installs sharing one SearchStax app were not isolated from each
-  other. The server's "Retrieve results for this site only" option
-  (`site_hash`) was never turned on, "Index items immediately"
-  (`index_directly`) was left on for copied indexes, and the per-site
-  `index_prefix` was written to the index's options bag instead of
+- Multisite installs were not isolated from each other. The server's "Retrieve
+  results for this site only" option (`site_hash`) was never turned on, and the
+  per-site `index_prefix` was written to the index's options bag instead of
   `third_party_settings.search_api_solr.advanced`, where `search_api_solr`
-  actually reads it — so the prefix silently had no effect. Also fixed
-  `_ssx_site_prefix()` to derive the prefix from the site's first hostname
+  actually reads it — so the prefix silently had no effect. Both now apply to
+  every site in a multisite run. `site_hash` is only ever written to turn the
+  option **on**, so a value set by hand in the UI survives a re-run.
+- `_ssx_site_prefix()` now derives the prefix from the site's first hostname
   label (e.g. `dmv` for `dmv.dev-nhdoit.acsitefactory.com`) instead of
-  slugifying the entire host.
+  slugifying the entire host. If any two sites would reduce to the same label,
+  every site falls back to the full-host prefix and the run warns — a shared
+  prefix would silently undo the separation the prefix exists to provide.
+
+### Changed
+- Copied indexes on sites that **share** a SearchStax app now have "Index items
+  immediately" (`index_directly`) turned off, batching indexing to cron so
+  concurrent per-save writes from sibling sites don't pile onto one app. This
+  delays when saved content becomes searchable; set `SRSX_KEEP_INDEX_DIRECTLY=1`
+  to opt out. Sites with a dedicated app are left alone.
+
+### Upgrade notes
+- Already-migrated sites: `clone-index.php` skips indexes it has already copied,
+  so re-running `index` will not apply the `index_directly` change to them — set
+  it in the UI if you want it. Re-running does rewrite `index_prefix`, and
+  because the derivation changed the new prefix will differ from the old one;
+  documents indexed under the previous prefix are orphaned until you reindex.
 - **Documentation claimed the `backup` phase created a database backup. It does
   not** — it prints instructions and blocks on a confirmation it cannot verify.
   README, QUICKSTART, PHASES, and SECURITY all said otherwise. Corrected

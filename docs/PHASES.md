@@ -334,21 +334,29 @@ the unsuffixed `SEARCHSTAX_*` vars for single-app compatibility. `migration.env`
 is git-ignored, so tokens stored there are never committed.
 
 Each per-site phase (`server`, `index`, `route`, `validate`) resolves the app for
-the current `--uri` and uses that app's endpoint and tokens. Sites that **share**
-an app get three settings so they don't step on each other:
+the current `--uri` and uses that app's endpoint and tokens. On top of that,
+multisite installs get isolation settings so sites don't step on each other:
 
-- A per-site `index_prefix` (via
-  [set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)),
-  namespacing each site's documents on the shared Solr index.
-- The server's "Retrieve results for this site only" option (`site_hash`,
-  set by [create-server.php](../lib/php-eval/create-server.php)), so a query
-  from one site never returns another site's documents.
-- "Index items immediately" turned off (`index_directly`, set by
-  [clone-index.php](../lib/php-eval/clone-index.php)) on each copied index,
-  so per-save indexing from one site doesn't pile write load onto an app the
-  other sites are also hitting.
+| Setting | Applied to | Why |
+| --- | --- | --- |
+| `index_prefix` (via [set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) | every site in a multisite run | Namespaces each site's documents, so two sites on one Solr collection stay distinct. |
+| `site_hash` — "Retrieve results for this site only" (via [create-server.php](../lib/php-eval/create-server.php)) | every site in a multisite run | A query from one site never returns another site's documents. |
+| `index_directly` off — "Index items immediately" (via [clone-index.php](../lib/php-eval/clone-index.php)) | **only** sites that share an app with another site, per `SITE_APP_MAP` | Batches indexing to cron instead of every node save, so sites sharing one app don't pile concurrent writes onto it. |
 
-All three are skipped when a site has its own dedicated app.
+The prefix is the site's first hostname label (`dmv` for
+`dmv.dev-nhdoit.acsitefactory.com`), skipping a leading `www`. If any two sites
+would reduce to the same label, every site falls back to a full-host prefix
+instead and the run prints a warning — a shared prefix would silently undo the
+separation it exists to provide.
+
+> **`index_directly` changes when content becomes searchable.** With it off, a
+> saved node is not in the index until the next cron run. Set
+> `SRSX_KEEP_INDEX_DIRECTLY=1` to leave the copied index alone if a site needs
+> immediate indexing.
+
+Single-site installs get none of these; `site_hash` in particular is left at
+whatever the server already has, so a value set by hand in the UI survives a
+re-run.
 
 > **Handoff caveat (multisite).** `handoff` currently exports config for the
 > default site only. Each additional site keeps its own config and must be

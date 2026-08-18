@@ -14,7 +14,9 @@
  * Set SRSX_CONNECTOR to force a different plugin id.
  *
  * SRSX_SITE_HASH=1 turns on "Retrieve results for this site only", so a
- * multisite sharing one SearchStax app doesn't see other sites' documents.
+ * multisite doesn't see its siblings' documents. Leave it unset to keep
+ * whatever the server already has — this script re-runs under --force and
+ * must not silently revert an operator's UI choice.
  *
  * Invoked via srsx-migrate's drush_php helper, which sets SRSX_* via putenv().
  *
@@ -34,7 +36,7 @@ $endpoint = getenv('SRSX_UPDATE_ENDPOINT') ?: '';
 $token    = getenv('SRSX_UPDATE_TOKEN') ?: '';
 $suggest  = getenv('SRSX_AUTOSUGGEST_ENDPOINT') ?: '';
 $wanted   = getenv('SRSX_CONNECTOR') ?: '';
-$site_hash = getenv('SRSX_SITE_HASH') === '1';
+$site_hash = getenv('SRSX_SITE_HASH') ?: '';
 
 if ($endpoint === '') {
   fwrite(STDERR, "[create-server] SRSX_UPDATE_ENDPOINT is required.\n");
@@ -107,7 +109,9 @@ if (!$server) {
 $backend = $server->get('backend_config') ?: [];
 $backend['connector'] = $connector;
 $backend['connector_config'] = $config;
-$backend['site_hash'] = $site_hash;
+if ($site_hash !== '') {
+  $backend['site_hash'] = ($site_hash === '1');
+}
 $server->set('backend', 'search_api_solr');
 $server->set('backend_config', $backend);
 $server->save();
@@ -116,7 +120,7 @@ fwrite(STDOUT, "[create-server] connector: {$connector}\n");
 fwrite(STDOUT, "[create-server] endpoint:  {$endpoint}\n");
 fwrite(STDOUT, "[create-server] host={$host} context={$context} core={$core} port={$port} path=/\n");
 fwrite(STDOUT, "[create-server] key_id: (none — credentials stored in config)\n");
-fwrite(STDOUT, "[create-server] site_hash: " . ($site_hash ? 'on' : 'off') . "\n");
+fwrite(STDOUT, "[create-server] site_hash: " . ($site_hash === '' ? 'unchanged' : ($site_hash === '1' ? 'on' : 'off')) . "\n");
 fwrite(STDOUT, "[create-server] Saved search_api.server.{$id}\n");
 
 // The module's UI decides what it can copy from this map, so register every

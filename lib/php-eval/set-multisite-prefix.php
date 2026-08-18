@@ -36,6 +36,13 @@ foreach ($indexStorage->loadMultiple() as $idx) {
   $advanced = $idx->getThirdPartySetting('search_api_solr', 'advanced') ?? [];
   $advanced['index_prefix'] = $prefix;
   $idx->setThirdPartySetting('search_api_solr', 'advanced', $advanced);
+  // Drop the key earlier releases wrote to the options bag, where nothing
+  // reads it, so config doesn't carry two prefixes that can disagree.
+  $opts = $idx->getOptions();
+  if (array_key_exists('index_prefix', $opts)) {
+    unset($opts['index_prefix']);
+    $idx->setOptions($opts);
+  }
   $idx->save();
   $count++;
   fwrite(STDOUT, "[set-multisite-prefix] {$idx->id()} prefix='{$prefix}'\n");

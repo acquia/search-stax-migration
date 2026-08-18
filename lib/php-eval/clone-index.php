@@ -16,16 +16,16 @@
  * that command's eligibility gate, which refuses any index whose current server
  * is not in the module's migrated_servers map — including one with no server.
  *
- * SRSX_MULTISITE_SHARED=1 turns off "Index items immediately" on the copy,
- * since immediate per-save indexing multiplies write load across every site
- * sharing the same SearchStax app.
+ * SRSX_INDEX_DIRECTLY_OFF=1 turns off "Index items immediately" on the copy,
+ * batching indexing to cron. srsx-migrate only sets it for sites that share a
+ * SearchStax app, since it trades search freshness for batched writes.
  *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
 $indexId  = getenv('SRSX_INDEX_ID') ?: '';
 $serverId = getenv('SRSX_NEW_SERVER_ID') ?: 'searchstax_server';
-$multisiteShared = getenv('SRSX_MULTISITE_SHARED') === '1';
+$indexDirectlyOff = getenv('SRSX_INDEX_DIRECTLY_OFF') === '1';
 
 if ($indexId === '') {
   fwrite(STDERR, "[clone-index] SRSX_INDEX_ID is required.\n");
@@ -64,12 +64,12 @@ if ($utility) {
 if (\Drupal::hasService('solr_to_searchstax_ss_migration.migration_helper')) {
   $helper = \Drupal::service('solr_to_searchstax_ss_migration.migration_helper');
   $newIndex = $helper->createIndexCopy($index, $serverId);
-  if ($multisiteShared) {
+  if ($indexDirectlyOff) {
     $opts = $newIndex->getOptions();
     $opts['index_directly'] = FALSE;
     $newIndex->setOptions($opts);
     $newIndex->save();
-    fwrite(STDOUT, "[clone-index] index_directly disabled (multisite shared app)\n");
+    fwrite(STDOUT, "[clone-index] index_directly disabled (shared SearchStax app)\n");
   }
   fwrite(STDOUT, "[clone-index] OK {$indexId} -> {$newIndex->id()}\n");
   return 0;
@@ -96,17 +96,13 @@ $values['id'] = $newId;
 $values['name'] = 'SearchStax index';
 $values['description'] = 'Copy of index ' . $index->label() . '.';
 $values['server'] = $serverId;
+if ($indexDirectlyOff) {
+  $values['options']['index_directly'] = FALSE;
+  fwrite(STDOUT, "[clone-index] index_directly disabled (shared SearchStax app)\n");
+}
 
 $newIndex = $indexStorage->create($values);
-if ($multisiteShared) {
-  $opts = $newIndex->getOptions();
-  $opts['index_directly'] = FALSE;
-  $newIndex->setOptions($opts);
-}
 $newIndex->save();
-if ($multisiteShared) {
-  fwrite(STDOUT, "[clone-index] index_directly disabled (multisite shared app)\n");
-}
 
 // The views phase resolves old index -> new index through this map.
 if ($utility) {

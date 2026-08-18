@@ -9,6 +9,8 @@
 #      (neither the module's form nor its drush command checks this, which is
 #      how a re-run used to mint searchstax_index_2, _3, …)
 #   3. the submodule is missing → hand-rolled copy with the same field surgery
+#   4. SRSX_INDEX_DIRECTLY_OFF=1 turns "Index items immediately" off on the
+#      copy, on both the module path and the fallback, and is a no-op otherwise
 #
 # Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
 
@@ -25,10 +27,13 @@ cat > "$harness" <<'PHP'
 <?php
 
 class FakeIndex {
+  public array $options = [];
   public function __construct(public string $id, public array $values = []) {}
   public function id(): string { return $this->id; }
   public function label(): string { return 'Legacy ' . $this->id; }
   public function toArray(): array { return $this->values + ['id' => $this->id]; }
+  public function getOptions(): array { return $this->options; }
+  public function setOptions(array $options): void { $this->options = $options; }
   public function save(): void { FakeStorage::$saved[] = $this->values; }
 }
 
@@ -51,9 +56,11 @@ class FakeUtility {
 
 class FakeHelper {
   public array $calls = [];
+  public ?FakeIndex $last = NULL;
   public function createIndexCopy($index, $serverId) {
     $this->calls[] = [$index->id(), $serverId];
-    return new FakeIndex('searchstax_index');
+    $this->last = new FakeIndex('searchstax_index');
+    return $this->last;
   }
 }
 
@@ -116,12 +123,15 @@ function srsx_assert(bool $cond, string $what): void {
 
 putenv('SRSX_INDEX_ID=acquia_search_index');
 putenv('SRSX_NEW_SERVER_ID=searchstax_server');
+putenv('SRSX_INDEX_DIRECTLY_OFF=0');
 
 // 1. Module present, nothing copied yet.
 [$utility, $helper] = srsx_setup([], TRUE);
 srsx_run();
 srsx_assert($helper->calls === [['acquia_search_index', 'searchstax_server']],
   'copy goes through MigrationHelper::createIndexCopy()');
+srsx_assert($helper->last->options === [],
+  'index_directly is left alone unless asked for');
 
 // 2. Already copied: must not copy again.
 [$utility, $helper] = srsx_setup(
@@ -146,6 +156,21 @@ srsx_assert($values['id'] === 'searchstax_index' && $values['server'] === 'searc
   'fallback names the copy searchstax_index on the SearchStax server');
 srsx_assert($utility->added === ['acquia_search_index' => 'searchstax_index'],
   'fallback still records the copy the views phase reads');
+srsx_assert(!isset($values['options']['index_directly']),
+  'fallback leaves index_directly alone unless asked for');
+
+// 4. SRSX_INDEX_DIRECTLY_OFF=1 on both paths.
+putenv('SRSX_INDEX_DIRECTLY_OFF=1');
+[$utility, $helper] = srsx_setup([], TRUE);
+srsx_run();
+srsx_assert($helper->last->options['index_directly'] === FALSE,
+  'module path turns index_directly off when asked');
+
+[$utility, $helper] = srsx_setup([], FALSE);
+srsx_run();
+srsx_assert(FakeStorage::$saved[0]['options']['index_directly'] === FALSE,
+  'fallback turns index_directly off when asked');
+putenv('SRSX_INDEX_DIRECTLY_OFF=0');
 
 echo "  clone-index OK\n";
 PHP
