@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix would silently undo the separation the prefix exists to provide.
 
 ### Changed
+- Multisite runs now prompt the operator to confirm the `index_prefix` for each
+  site. The derived value (first hostname label, or full-host slug when any two
+  sites would collide) is offered as the default; a duplicate answer is rejected
+  and the prompt repeats. The confirmed prefix is persisted as `SITE_PREFIX_MAP`
+  in `migration.env` and honoured on resume or `--force`, so re-running never
+  silently re-derives a different value after content has been indexed under the
+  original. Non-interactive mode (`DRY_RUN=1`) and a pre-set `SITE_PREFIX_MAP`
+  both skip the prompt and auto-derive directly.
 - Copied indexes now have "Index items immediately" (`index_directly`) turned
   off, so indexing runs on cron. Indexing on every node save drives customers
   over their SearchStax entitlement and is not the recommended pattern on

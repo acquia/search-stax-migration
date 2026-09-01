@@ -341,14 +341,20 @@ multisite installs get isolation settings so sites don't step on each other:
 
 | Setting | Applied to | Why |
 | --- | --- | --- |
-| `index_prefix` (via [set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) | every site in a multisite run | Namespaces each site's documents, so two sites on one Solr collection stay distinct. |
+| `index_prefix` (via [set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) | every site in a multisite run | Namespaces each site's documents so two sites on one Solr collection stay distinct. Prompted from the operator during `configure`/`provision` (default = derived, uniqueness enforced); persisted as `SITE_PREFIX_MAP` in `migration.env` and honoured on resume. |
 | `site_hash` — "Retrieve results for this site only" (via [create-server.php](../lib/php-eval/create-server.php)) | every site in a multisite run | A query from one site never returns another site's documents. |
 
-The prefix is the site's first hostname label (`dmv` for
-`dmv.dev-nhdoit.acsitefactory.com`), skipping a leading `www`. If any two sites
-would reduce to the same label, every site falls back to a full-host prefix
-instead and the run prints a warning — a shared prefix would silently undo the
-separation it exists to provide.
+During `configure`/`provision` the toolkit prompts the operator once per site
+for their `index_prefix`, offering the derived value as the default. The derived
+value is the site's first hostname label (`dmv` for
+`dmv.dev-nhdoit.acsitefactory.com`), skipping a leading `www`; if any two sites
+would reduce to the same label, every site falls back to the full-host slug
+instead. A duplicate answer is rejected and the prompt repeats until every
+site has a unique prefix. The confirmed map is persisted as `SITE_PREFIX_MAP` in
+`migration.env` and honoured on resume or `--force`, so re-running never
+silently re-derives a different value after content has been indexed under the
+original. In non-interactive mode (`DRY_RUN=1`) or when `SITE_PREFIX_MAP` is
+already set, the wizard is skipped and the derived value is used directly.
 
 Single-site installs get neither; `site_hash` in particular is left at whatever
 the server already has, so a value set by hand in the UI survives a re-run.

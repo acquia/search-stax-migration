@@ -13,7 +13,9 @@
 #      not unique (dmv.dev-nhdoit… and dmv.nhdoit…, www.example.com and
 #      example.org). A shared prefix silently re-merges what the prefix exists
 #      to separate, so any collision demotes EVERY site to a full-host prefix.
-#   D) set-multisite-prefix.php writes index_prefix where search_api_solr reads
+#   D) _site_prefix_from_map — looks up a URI in SITE_PREFIX_MAP and echoes
+#      the operator-chosen prefix, or empty when the map is unset/absent.
+#   E) set-multisite-prefix.php writes index_prefix where search_api_solr reads
 #      it (third_party_settings.search_api_solr.advanced) and clears the dead
 #      key earlier releases left in the options bag.
 #
@@ -36,6 +38,7 @@ awk '/^_site_app_index\(\) \{/{f=1}
      f' srsx-migrate > "$helpers"
 for fn in _site_app_index _sites_for_app _ssx_site_prefix _ssx_site_prefix_full \
           _ssx_site_prefixes_collide _ssx_resolve_site_prefix \
+          _site_prefix_from_map ensure_site_prefix_map \
           _srsx_multisite_active _srsx_index_directly_off; do
   grep -q "^${fn}() {" "$helpers" || fail "helper extraction missed ${fn}()"
 done
@@ -118,7 +121,25 @@ p2="$(_ssx_resolve_site_prefix "${SITES_ARR[1]}")"
 echo "  www.example.com and example.org get distinct prefixes OK"
 
 # ---------------------------------------------------------------------------
-# D — set-multisite-prefix.php writes where search_api_solr actually reads
+# D — _site_prefix_from_map
+# ---------------------------------------------------------------------------
+SITE_PREFIX_MAP=""
+eq "unset map returns empty for any URI" \
+   "$(_site_prefix_from_map 'https://a.example.com')" ''
+
+SITE_PREFIX_MAP="https://a.example.com=a_,https://b.example.com=b_"
+eq "known URI returns its prefix (a)" \
+   "$(_site_prefix_from_map 'https://a.example.com')" 'a_'
+eq "known URI returns its prefix (b)" \
+   "$(_site_prefix_from_map 'https://b.example.com')" 'b_'
+eq "absent URI returns empty" \
+   "$(_site_prefix_from_map 'https://c.example.com')" ''
+unset SITE_PREFIX_MAP
+
+# ensure_site_prefix_map is interactive and is covered by test-multisite-prefix.sh.
+
+# ---------------------------------------------------------------------------
+# E — set-multisite-prefix.php writes where search_api_solr actually reads
 # ---------------------------------------------------------------------------
 if ! command -v php >/dev/null 2>&1; then
   echo "  (php missing — skipping set-multisite-prefix test)"

@@ -38,11 +38,14 @@ EOF
 #   install branch: main
 #   topology count: 2   (min=1, n=3 → custom assignment path)
 #   assign a=1, b=1, c=2
-#   app1 creds: endpoint, read, write, analytics-url, analytics-key
-#   app2 creds: endpoint, read, write, analytics-url, analytics-key
+#   prefix for a.example.com: a_  (accept default)
+#   prefix for b.example.com: b_  (accept default)
+#   prefix for c.example.com: c_  (accept default)
+#   app1 creds: endpoint, write, analytics-url, analytics-key
+#   app2 creds: endpoint, write, analytics-url, analytics-key
 #   analytics-key storage: 1 (Key module)
 A_LOG=/tmp/srsx-topology-a.log
-DEMO_ANSWERS="1,,main,2,1,1,2,https://app1.example.searchstax.com,w1,https://an1.example.searchstax.com,k1,https://app2.example.searchstax.com,w2,https://an2.example.searchstax.com,k2,1" \
+DEMO_ANSWERS="1,,main,2,1,1,2,a_,b_,c_,https://app1.example.searchstax.com,w1,https://an1.example.searchstax.com,k1,https://app2.example.searchstax.com,w2,https://an2.example.searchstax.com,k2,1" \
     ./srsx-migrate --demo all </dev/null >"$A_LOG" 2>&1 \
     || fail "scenario A run exited non-zero" "$A_LOG"
 
@@ -60,6 +63,9 @@ grep -q '^SEARCHSTAX_APP_ENDPOINT_2="https://app2.example.searchstax.com"$' "$EN
     || fail "app 2 endpoint not persisted" "$A_LOG"
 
 grep -q '^SEARCHSTAX_WRITE_TOKEN_2="w2"$' "$ENV_A" || fail "app 2 write token not persisted" "$A_LOG"
+
+grep -q '^SITE_PREFIX_MAP="https://a.example.com=a_,https://b.example.com=b_,https://c.example.com=c_"$' "$ENV_A" \
+    || fail "SITE_PREFIX_MAP not persisted" "$A_LOG"
 
 # App 1 must mirror the unsuffixed vars for single-app backward compatibility.
 grep -q '^SEARCHSTAX_APP_ENDPOINT="https://app1.example.searchstax.com"$' "$ENV_A" \
@@ -90,11 +96,12 @@ EOF
 # Answer order for standalone configure:
 #   topology count: 1  → REJECTED (min 2 for 10 sites)
 #   topology count: 2  → accepted, default packing (no per-site prompts)
-#   app1: endpoint, read, write, analytics-url(blank → key skipped)
-#   app2: endpoint, read, write, analytics-url(blank → key skipped)
+#   prefix for s1..s10 (accept defaults: s1_..s10_)
+#   app1: endpoint, write, analytics-url(blank → key skipped)
+#   app2: endpoint, write, analytics-url(blank → key skipped)
 #   analytics-key storage: 1
 B_LOG=/tmp/srsx-topology-b.log
-DEMO_ANSWERS="1,2,https://app1.example.searchstax.com,w1,,https://app2.example.searchstax.com,w2,,1" \
+DEMO_ANSWERS="1,2,s1_,s2_,s3_,s4_,s5_,s6_,s7_,s8_,s9_,s10_,https://app1.example.searchstax.com,w1,,https://app2.example.searchstax.com,w2,,1" \
     ./srsx-migrate --demo configure --only </dev/null >"$B_LOG" 2>&1 \
     || fail "scenario B configure exited non-zero" "$B_LOG"
 
@@ -108,6 +115,11 @@ grep -q '^SEARCHSTAX_APP_COUNT="2"$' "$ENV_B" \
 # Default packing: first 9 sites → app 1, 10th → app 2.
 grep -q '^SITE_APP_MAP=.*https://s9.example.com=1.*https://s10.example.com=2"$' "$ENV_B" \
     || fail "default packing did not put 9 on app1 / 10th on app2" "$B_LOG"
+
+grep -q 'https://s1.example.com=s1_' "$ENV_B" \
+    || fail "SITE_PREFIX_MAP missing s1_ entry" "$B_LOG"
+grep -q 'https://s10.example.com=s10_' "$ENV_B" \
+    || fail "SITE_PREFIX_MAP missing s10_ entry" "$B_LOG"
 
 echo "  topology scenario B (10 sites, 9-per-app cap) OK"
 

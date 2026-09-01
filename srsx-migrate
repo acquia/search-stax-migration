@@ -1224,6 +1224,64 @@ _ssx_resolve_site_prefix() {
   fi
 }
 
+# Echo the operator-chosen index_prefix for a site from SITE_PREFIX_MAP, or
+# empty when the map is unset or the uri is absent.
+_site_prefix_from_map() {
+  local uri="$1"
+  [[ -n "${SITE_PREFIX_MAP:-}" ]] || return 0
+  local pair
+  IFS=',' read -r -a _spm_pairs <<< "$SITE_PREFIX_MAP"
+  for pair in "${_spm_pairs[@]}"; do
+    if [[ "${pair%%=*}" == "$uri" ]]; then
+      printf '%s' "${pair#*=}"
+      return 0
+    fi
+  done
+}
+
+# Prompt the operator to confirm the index_prefix for each site (once, after
+# ensure_site_app_topology has settled SITE_APP_MAP). Idempotent: returns
+# immediately when SITE_PREFIX_MAP is already set (resume / --force), when
+# there are no sites (single-site run), or when DRY_RUN is active.
+ensure_site_prefix_map() {
+  (( ${#SITES_ARR[@]} > 0 )) || return 0
+  if [[ -n "${SITE_PREFIX_MAP:-}" ]]; then
+    return 0
+  fi
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  printf '\n'
+  info "Each site needs a unique Solr index_prefix to keep its documents separate"
+  info "on the shared SearchStax collection.  Accept the default or enter your own."
+  info "  ⚠  Changing a prefix after content has been indexed orphans those documents"
+  info "     until a full reindex.  The value is saved to migration.env and reused"
+  info "     on every subsequent run."
+
+  local map="" used="," s default prefix
+  for s in "${SITES_ARR[@]}"; do
+    default="$(_ssx_resolve_site_prefix "$s")"
+    while :; do
+      ask "index_prefix for ${s}" prefix "$default"
+      if [[ -z "$prefix" ]]; then
+        warn "Prefix cannot be empty."; continue
+      fi
+      if [[ "$used" == *",${prefix},"* ]]; then
+        warn "'${prefix}' is already used by another site — every prefix must be unique."; continue
+      fi
+      break
+    done
+    used+="${prefix},"
+    map+="${s}=${prefix},"
+  done
+  map="${map%,}"
+
+  SITE_PREFIX_MAP="$map"
+  _save_env_var SITE_PREFIX_MAP "$map"
+  ok "index_prefix confirmed for ${#SITES_ARR[@]} site(s)."
+}
+
 # True when this run is per-site (multisite with an active --uri). index_prefix
 # and site_hash apply to every such site: namespacing documents and filtering
 # to "this site only" are correct whether or not the app is shared.
@@ -1955,6 +2013,7 @@ phase_provision() {
   # 2. Establish how many apps this (multi)site needs before deciding whether
   #    provisioning is required. Single-site → one app, no questions.
   ensure_site_app_topology
+  ensure_site_prefix_map
 
   # 3. Endpoint(s) already configured (previous run, TAM-provisioned app, or a
   #    standalone create-apps invocation by the operator).
@@ -2190,6 +2249,7 @@ phase_configure() {
   guard_against_prod
 
   ensure_site_app_topology
+  ensure_site_prefix_map
 
   cat <<EOF
 Where to find SearchStax credentials:
@@ -2531,9 +2591,13 @@ _phase_index_site() {
   # a query can be filtered to "this site only". Harmless when a site has its
   # own app.
   if _srsx_multisite_active; then
-    local prefix; prefix="$(_ssx_resolve_site_prefix "$DRUSH_URI")"
-    if _ssx_site_prefixes_collide; then
-      warn "Two sites reduce to the same short index_prefix; using full-host prefixes."
+    local prefix; prefix="$(_site_prefix_from_map "$DRUSH_URI")"
+    if [[ -z "$prefix" ]]; then
+      # DRY_RUN path: map was not built interactively, derive in-memory.
+      prefix="$(_ssx_resolve_site_prefix "$DRUSH_URI")"
+      if _ssx_site_prefixes_collide; then
+        warn "Two sites reduce to the same short index_prefix; using full-host prefixes."
+      fi
     fi
     info "Setting index_prefix '${prefix}' for ${DRUSH_URI}"
     drush_php set-multisite-prefix.php \
