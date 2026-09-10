@@ -16,11 +16,16 @@
  * that command's eligibility gate, which refuses any index whose current server
  * is not in the module's migrated_servers map — including one with no server.
  *
+ * SRSX_INDEX_DIRECTLY_OFF=1 turns off "Index items immediately" on the copy,
+ * batching indexing to cron. srsx-migrate sets it by default: per-save
+ * indexing pushes customers over their SearchStax entitlement.
+ *
  * Copyright 2026 Mohammad Zomorodian, Acquia Inc. (Apache-2.0)
  */
 
 $indexId  = getenv('SRSX_INDEX_ID') ?: '';
 $serverId = getenv('SRSX_NEW_SERVER_ID') ?: 'searchstax_server';
+$indexDirectlyOff = getenv('SRSX_INDEX_DIRECTLY_OFF') === '1';
 
 if ($indexId === '') {
   fwrite(STDERR, "[clone-index] SRSX_INDEX_ID is required.\n");
@@ -59,6 +64,13 @@ if ($utility) {
 if (\Drupal::hasService('solr_to_searchstax_ss_migration.migration_helper')) {
   $helper = \Drupal::service('solr_to_searchstax_ss_migration.migration_helper');
   $newIndex = $helper->createIndexCopy($index, $serverId);
+  if ($indexDirectlyOff) {
+    $opts = $newIndex->getOptions();
+    $opts['index_directly'] = FALSE;
+    $newIndex->setOptions($opts);
+    $newIndex->save();
+    fwrite(STDOUT, "[clone-index] index_directly disabled (indexing runs on cron)\n");
+  }
   fwrite(STDOUT, "[clone-index] OK {$indexId} -> {$newIndex->id()}\n");
   return 0;
 }
@@ -84,6 +96,10 @@ $values['id'] = $newId;
 $values['name'] = 'SearchStax index';
 $values['description'] = 'Copy of index ' . $index->label() . '.';
 $values['server'] = $serverId;
+if ($indexDirectlyOff) {
+  $values['options']['index_directly'] = FALSE;
+  fwrite(STDOUT, "[clone-index] index_directly disabled (indexing runs on cron)\n");
+}
 
 $newIndex = $indexStorage->create($values);
 $newIndex->save();

@@ -213,6 +213,8 @@ The PHP helper calls `\Drupal::service('solr_to_searchstax_ss_migration.migratio
 
 Re-running the phase is safe: an index already recorded in the module's `copied_indexes` map is skipped rather than copied again.
 
+Every copy has **"Index items immediately"** (`index_directly`) turned off. Indexing on every node save drives customers over their SearchStax entitlement and is not the recommended pattern on Acquia; indexing runs on cron instead. This applies to single-site installs as much as multisite. Set `SRSX_KEEP_INDEX_DIRECTLY=1` to leave the setting as the source index had it — be aware that a saved node is then not searchable until the next cron run.
+
 Then for each index now on the SearchStax server:
 
 ```bash
@@ -334,10 +336,24 @@ the unsuffixed `SEARCHSTAX_*` vars for single-app compatibility. `migration.env`
 is git-ignored, so tokens stored there are never committed.
 
 Each per-site phase (`server`, `index`, `route`, `validate`) resolves the app for
-the current `--uri` and uses that app's endpoint and tokens. Sites that **share**
-an app are namespaced with a per-site `index_prefix` (via
-[set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) so
-"results from this site only" filtering works.
+the current `--uri` and uses that app's endpoint and tokens. On top of that,
+multisite installs get isolation settings so sites don't step on each other:
+
+| Setting | Applied to | Why |
+| --- | --- | --- |
+| `index_prefix` (via [set-multisite-prefix.php](../lib/php-eval/set-multisite-prefix.php)) | every site in a multisite run | Namespaces each site's documents, so two sites on one Solr collection stay distinct. |
+| `site_hash` — "Retrieve results for this site only" (via [create-server.php](../lib/php-eval/create-server.php)) | every site in a multisite run | A query from one site never returns another site's documents. |
+
+The prefix is the site's first hostname label (`dmv` for
+`dmv.dev-nhdoit.acsitefactory.com`), skipping a leading `www`. If any two sites
+would reduce to the same label, every site falls back to a full-host prefix
+instead and the run prints a warning — a shared prefix would silently undo the
+separation it exists to provide.
+
+Single-site installs get neither; `site_hash` in particular is left at whatever
+the server already has, so a value set by hand in the UI survives a re-run.
+(`index_directly` is turned off for every migrated index, multisite or not — see
+[`index`](#index).)
 
 > **Handoff caveat (multisite).** `handoff` currently exports config for the
 > default site only. Each additional site keeps its own config and must be
